@@ -66,11 +66,25 @@ if [[ "$1" == "--reconfigure" || "$1" == "-Reconfigure" ]]; then
 fi
 
 echo -e "\n--- Installation ---"
-if command -v cargo &> /dev/null; then
-    echo "Cargo detected. Building from source..."
-    echo "Please run 'cargo install --path .' from the project root to install."
+EXE_PATH="$APP_DIR/klein.exe"
+
+echo "Downloading pre-compiled binary from GitHub Releases..."
+if curl -fsSL "https://github.com/Adarsh-codesOP/Klein/releases/download/release/klein.exe" -o "$EXE_PATH"; then
+    chmod +x "$EXE_PATH"
+    echo -e "Successfully downloaded to $EXE_PATH"
+    
+    BASHRC="$HOME/.bashrc"
+    if [ -f "$BASHRC" ] && ! grep -q "$APP_DIR" "$BASHRC"; then
+        echo -e "\nexport PATH=\"\$PATH:$APP_DIR\"" >> "$BASHRC"
+        echo "Added $APP_DIR to PATH in $BASHRC."
+        echo "Please run 'source ~/.bashrc' or restart your terminal to use the 'klein' command globally."
+    elif [ ! -f "$BASHRC" ]; then
+        echo -e "export PATH=\"\$PATH:$APP_DIR\"" >> "$BASHRC"
+        echo "Created $BASHRC and added $APP_DIR to PATH."
+        echo "Please run 'source ~/.bashrc' or restart your terminal to use the 'klein' command globally."
+    fi
 else
-    echo "Cargo not detected. Please install Rust (https://rustup.rs/) or download the pre-compiled binary."
+    echo "Failed to download the executable. Please install Rust and run 'cargo install --path .' from the source."
 fi
 
 prompt_configuration

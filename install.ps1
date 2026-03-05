@@ -73,19 +73,26 @@ if ($Reconfigure) {
     exit
 }
 
-# 3. Installation Step (Placeholder for actual binary download)
+# 3. Installation Step
 Write-Host "`n--- Installation ---" -ForegroundColor Yellow
-# Assuming Cargo is installed since this is a Rust project currently
-$cargoExists = Get-Command "cargo" -ErrorAction SilentlyContinue
 
-if ($cargoExists) {
-    Write-Host "Cargo detected. Building from source..."
-    # Ideally, this script would be curled from a repo, so it assumes we are in the repo or downloads it.
-    # For now, it alerts the user how to build it.
-    Write-Host "Please run 'cargo install --path .' from the project root to install." -ForegroundColor Cyan
+$exePath = "$AppDir\klein.exe"
+try {
+    Write-Host "Downloading pre-compiled binary from GitHub Releases..." -ForegroundColor Yellow
+    Invoke-WebRequest -Uri "https://github.com/Adarsh-codesOP/Klein/releases/download/release/klein.exe" -OutFile "$exePath"
+    Write-Host "Successfully downloaded to $exePath" -ForegroundColor Green
+    
+    # Add to User PATH if not present
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($userPath -notmatch [regex]::Escape($AppDir)) {
+        $newPath = $userPath + ";" + $AppDir
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+        Write-Host "Added $AppDir to your User PATH environment variable." -ForegroundColor Green
+        Write-Host "You may need to restart your terminal to use the 'klein' command globally." -ForegroundColor Yellow
+    }
 }
-else {
-    Write-Host "Cargo not detected. Please install Rust (https://rustup.rs/) or download the pre-compiled binary." -ForegroundColor Red
+catch {
+    Write-Host "Failed to download the executable. Please install Rust and run 'cargo install --path .' from the source code." -ForegroundColor Red
 }
 
 Prompt-Configuration
