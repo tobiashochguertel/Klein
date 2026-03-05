@@ -1,6 +1,6 @@
 <h1 align="center">
   <br>
-  <!-- <img src="assets/logo.png" alt="Klein IDE" width="200"> -->
+  <img src="Assets/logo.png" alt="Klein IDE" width="200">
   Klein IDE
   <br>
 </h1>
