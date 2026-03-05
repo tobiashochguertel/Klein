@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::config;
+
 
 pub struct Terminal {
     pub _pty_pair: PtyPair,
@@ -12,7 +12,7 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    pub fn new(cwd: std::path::PathBuf) -> Self {
+    pub fn new(cwd: std::path::PathBuf, preferred_shell: Option<String>) -> Self {
         let pty_system = native_pty_system();
         let pty_pair = pty_system
             .openpty(PtySize {
@@ -23,8 +23,48 @@ impl Terminal {
             })
             .unwrap();
 
-        let mut cmd = CommandBuilder::new(config::TERMINAL_BASH_PATH); 
-        cmd.args(&["--login", "-i"]);
+        // Check if preferred shell exists and is usable
+        let mut explicit_shell: Option<(String, Vec<&str>)> = None;
+        if let Some(shell) = preferred_shell {
+            if shell != "auto" {
+                // Determine test arguments based on the shell
+                let test_arg = if shell.contains("powershell") { "-Command" } else { "--version" };
+                let test_arg2 = if shell.contains("powershell") { "exit" } else { "" };
+                
+                let mut cmd = std::process::Command::new(&shell);
+                cmd.arg(test_arg);
+                if !test_arg2.is_empty() {
+                    cmd.arg(test_arg2);
+                }
+
+                if cmd.output().is_ok() {
+                    if shell == "bash" || shell.ends_with("bash.exe") {
+                        explicit_shell = Some((shell, vec!["--login", "-i"]));
+                    } else {
+                        explicit_shell = Some((shell, vec![]));
+                    }
+                }
+            }
+        }
+
+        // Dynamically resolve the best available shell
+        let (shell_path, args) = if let Some(explicit) = explicit_shell {
+            (explicit.0, explicit.1)
+        } else if std::path::Path::new("C:\\Program Files\\Git\\bin\\bash.exe").exists() {
+            ("C:\\Program Files\\Git\\bin\\bash.exe".to_string(), vec!["--login", "-i"])
+        } else if std::path::Path::new("C:\\Program local\\Git\\bin\\bash.exe").exists() {
+            ("C:\\Program local\\Git\\bin\\bash.exe".to_string(), vec!["--login", "-i"])
+        } else if std::process::Command::new("bash").arg("--version").output().is_ok() {
+            ("bash".to_string(), vec!["--login", "-i"])
+        } else if std::process::Command::new("powershell").arg("-Command").arg("exit").output().is_ok() {
+            ("powershell.exe".to_string(), vec![])
+        } else {
+            // Ultimate fallback
+            ("cmd.exe".to_string(), vec![])
+        };
+
+        let mut cmd = CommandBuilder::new(shell_path); 
+        cmd.args(&args);
         cmd.env("TERM", "xterm-256color");
         cmd.cwd(cwd);
         let _child = pty_pair.slave.spawn_command(cmd).unwrap();

@@ -12,7 +12,7 @@
   <a href="https://rustup.rs/">
     <img src="https://img.shields.io/badge/Rust-1.75+-orange.svg" alt="Rust Version">
   </a>
-  <a href="https://github.com/your-username/klein/blob/main/LICENSE">
+  <a href="https://github.com/Adarsh-CodesOP/klein/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License">
   </a>
   <a href="#features">
@@ -59,20 +59,40 @@ Klein doesn't compromise on functionality or looks. Here is what you get out of 
 
 ## 🚀 Installation
 
-To get started with Klein, ensure you have [Rust and Cargo](https://rustup.rs/) installed on your system. 
+### Automatic Setup (Recommended for Windows)
 
-> **Note for Windows Users:** The embedded terminal relies on Git Bash by default (`C:\Program Files\Git\bin\bash.exe`). Ensure it is installed on your machine, or adapt the path in the configuration.
+We provide an installation script that sets up your default workspace, preferred terminal, and builds the application for you.
 
-1. **Clone the repository:**
+**Using PowerShell (Windows Native):**
+```powershell
+irm https://raw.githubusercontent.com/Klein-IDE/Klein/main/install.ps1 | iex
+```
+*(Note: If you already have the repository cloned, you can just run `.\install.ps1`)*
+
+**Using Bash (Git Bash/WSL/Linux):**
+```bash
+curl -sSL https://raw.githubusercontent.com/Klein-IDE/Klein/main/install.sh | bash
+```
+
+**Reconfiguring:**
+If you ever need to change your default workspace or preferred shell later, run:
+```powershell
+.\install.ps1 -Reconfigure
+```
+*(Or `./install.sh --reconfigure`)*
+
+### Manual Installation
+
+If you prefer to build it manually from source:
+
+1. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/klein.git
-   cd klein
+   git clone https://github.com/adarsh-codesOP/Klein.git
+   cd Klein
    ```
-
-2. **Build and Run:**
-   Fetch the dependencies and launch the IDE. Compiling in release mode is recommended for optimal UI performance.
+2. Build and install:
    ```bash
-   cargo run --release
+   cargo install --path .
    ```
 
 ---

@@ -33,7 +33,6 @@ pub const HELP_TEXT: &str = r#"
 [Ctrl + H] Toggle this help overlay
 "#;
 
-pub const TERMINAL_BASH_PATH: &str = "C:\\Program Files\\Git\\bin\\bash.exe";
 
 pub mod colors {
     use ratatui::style::Color;
@@ -44,4 +43,31 @@ pub mod colors {
     pub const STATUS_BG: Color = Color::DarkGray;
     pub const STATUS_FG: Color = Color::Gray;
     pub const SEARCH_BORDER: Color = Color::Cyan;
+}
+
+use serde::Deserialize;
+use std::path::PathBuf;
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AppConfig {
+    pub default_workspace: Option<String>,
+    pub shell: Option<String>,
+}
+
+impl AppConfig {
+    pub fn load() -> Self {
+        if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "Klein") {
+            let config_dir = proj_dirs.config_dir();
+            let config_path = config_dir.join("config.toml");
+            
+            if config_path.exists() {
+                if let Ok(contents) = std::fs::read_to_string(&config_path) {
+                    if let Ok(config) = toml::from_str::<AppConfig>(&contents) {
+                        return config;
+                    }
+                }
+            }
+        }
+        AppConfig::default()
+    }
 }

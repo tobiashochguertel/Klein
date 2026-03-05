@@ -32,7 +32,20 @@ pub struct App {
 
 impl App {
     pub fn new() -> App {
-        let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let config = crate::config::AppConfig::load();
+        
+        // Try to respect workspace from config first, fallback to current_dir
+        let current_dir = if let Some(ws) = config.default_workspace {
+            let path = std::path::PathBuf::from(ws);
+            if path.exists() {
+               path
+            } else {
+               std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            }
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        };
+        
         App {
             active_panel: Panel::Editor,
             show_sidebar: true,
@@ -42,7 +55,7 @@ impl App {
             tabs: vec![TabState::new()],
             active_tab: 0,
             preview: None,
-            terminal: Terminal::new(current_dir),
+            terminal: Terminal::new(current_dir.clone(), config.shell.clone()),
             last_editor_height: Cell::new(20),
             editor_area: Cell::new(ratatui::layout::Rect::default()),
             show_help: false,
