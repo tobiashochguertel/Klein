@@ -44,8 +44,11 @@ prompt_configuration() {
         fi
     fi
 
-    read -p "Enter your preferred terminal shell (bash, powershell, cmd) [Default: auto-detect]: " shell
-    shell=${shell:-auto}
+    if [ -d "/c/Program Files/Git" ] || [ -d "/c/Users/$USER/AppData/Local/Programs/Git" ] || command -v bash &> /dev/null; then
+        shell="bash"
+    else
+        shell="auto"
+    fi
 
     cat > "$CONFIG_PATH" <<EOF
 # Klein IDE Configuration
