@@ -56,6 +56,8 @@ pub struct Sidebar {
     pub root: FileNode,
     pub selected_index: usize,
     pub flat_list: Vec<(PathBuf, usize, bool)>, // (path, depth, is_dir)
+    pub offset: usize,
+    pub last_height: std::cell::Cell<usize>,
 }
 
 impl Sidebar {
@@ -66,6 +68,8 @@ impl Sidebar {
             root,
             selected_index: 0,
             flat_list: Vec::new(),
+            offset: 0,
+            last_height: std::cell::Cell::new(20),
         };
         sidebar.update_flat_list();
         sidebar
@@ -101,6 +105,7 @@ impl Sidebar {
     pub fn next(&mut self) -> Option<PathBuf> {
         if !self.flat_list.is_empty() {
             self.selected_index = (self.selected_index + 1) % self.flat_list.len();
+            self.adjust_scroll();
             let (path, _, is_dir) = &self.flat_list[self.selected_index];
             if !*is_dir {
                 return Some(path.clone());
@@ -116,12 +121,26 @@ impl Sidebar {
             } else {
                 self.selected_index = self.flat_list.len() - 1;
             }
+            self.adjust_scroll();
             let (path, _, is_dir) = &self.flat_list[self.selected_index];
             if !*is_dir {
                 return Some(path.clone());
             }
         }
         None
+    }
+
+    fn adjust_scroll(&mut self) {
+        let height = self.last_height.get().saturating_sub(2); // Account for borders
+        if height == 0 {
+            return;
+        }
+
+        if self.selected_index >= self.offset + height {
+            self.offset = self.selected_index.saturating_sub(height).saturating_add(1);
+        } else if self.selected_index < self.offset {
+            self.offset = self.selected_index;
+        }
     }
 
     pub fn toggle_selected(&mut self) -> Result<Option<PathBuf>> {
