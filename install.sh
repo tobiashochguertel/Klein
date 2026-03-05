@@ -69,7 +69,7 @@ echo -e "\n--- Installation ---"
 EXE_PATH="$APP_DIR/klein.exe"
 
 echo "Downloading pre-compiled binary from GitHub Releases..."
-if curl -fsSL "https://github.com/Adarsh-codesOP/Klein/releases/download/release/klein.exe" -o "$EXE_PATH"; then
+if curl -fsSL "https://github.com/Adarsh-codesOP/Klein/releases/download/stable/klein.exe" -o "$EXE_PATH"; then
     chmod +x "$EXE_PATH"
     echo -e "Successfully downloaded to $EXE_PATH"
     

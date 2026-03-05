@@ -79,7 +79,7 @@ Write-Host "`n--- Installation ---" -ForegroundColor Yellow
 $exePath = "$AppDir\klein.exe"
 try {
     Write-Host "Downloading pre-compiled binary from GitHub Releases..." -ForegroundColor Yellow
-    Invoke-WebRequest -Uri "https://github.com/Adarsh-codesOP/Klein/releases/download/release/klein.exe" -OutFile "$exePath"
+    Invoke-WebRequest -Uri "https://github.com/Adarsh-codesOP/Klein/releases/download/stable/klein.exe" -OutFile "$exePath"
     Write-Host "Successfully downloaded to $exePath" -ForegroundColor Green
     
     # Add to User PATH if not present
