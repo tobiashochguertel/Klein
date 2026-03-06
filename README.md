@@ -37,7 +37,7 @@
 
 Whether you're editing multiple files, browsing a project directory, or compiling code from the embedded shell, Klein brings essential workflow tools into one efficient console application.
 
-![Klein TIDE Screenshot](src/Assets/logo.png)
+![Klein TIDE Screenshot](src/Assets/demo.png)
 
 
 ---
