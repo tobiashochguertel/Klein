@@ -1,6 +1,6 @@
+use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
-use anyhow::Result;
 
 pub struct FileNode {
     pub path: PathBuf,
@@ -81,16 +81,17 @@ impl Sidebar {
         self.flat_list = list;
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn flatten(&self, node: &FileNode, depth: usize, list: &mut Vec<(PathBuf, usize, bool)>) {
         // Skip root itself if it's the current project dir? No, let's show it or its children.
         // Usually we show children of root.
         list.push((node.path.clone(), depth, node.is_dir));
 
-        if node.is_expanded {
-            if let Some(children) = &node.children {
-                for child in children {
-                    self.flatten(child, depth + 1, list);
-                }
+        if node.is_expanded
+            && let Some(children) = &node.children
+        {
+            for child in children {
+                self.flatten(child, depth + 1, list);
             }
         } else if depth == 0 {
             // If root is collapsed but we are at depth 0, we still want to show its children if it's the "workspace"

@@ -1,9 +1,7 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
+use portable_pty::{CommandBuilder, PtyPair, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
-
-
 
 pub struct Terminal {
     pub _pty_pair: PtyPair,
@@ -25,24 +23,32 @@ impl Terminal {
 
         // Check if preferred shell exists and is usable
         let mut explicit_shell: Option<(String, Vec<&str>)> = None;
-        if let Some(shell) = preferred_shell {
-            if shell != "auto" {
-                // Determine test arguments based on the shell
-                let test_arg = if shell.contains("powershell") { "-Command" } else { "--version" };
-                let test_arg2 = if shell.contains("powershell") { "exit" } else { "" };
-                
-                let mut cmd = std::process::Command::new(&shell);
-                cmd.arg(test_arg);
-                if !test_arg2.is_empty() {
-                    cmd.arg(test_arg2);
-                }
+        if let Some(shell) = preferred_shell
+            && shell != "auto"
+        {
+            // Determine test arguments based on the shell
+            let test_arg = if shell.contains("powershell") {
+                "-Command"
+            } else {
+                "--version"
+            };
+            let test_arg2 = if shell.contains("powershell") {
+                "exit"
+            } else {
+                ""
+            };
 
-                if cmd.output().is_ok() {
-                    if shell == "bash" || shell.ends_with("bash.exe") {
-                        explicit_shell = Some((shell, vec!["--login", "-i"]));
-                    } else {
-                        explicit_shell = Some((shell, vec![]));
-                    }
+            let mut cmd = std::process::Command::new(&shell);
+            cmd.arg(test_arg);
+            if !test_arg2.is_empty() {
+                cmd.arg(test_arg2);
+            }
+
+            if cmd.output().is_ok() {
+                if shell == "bash" || shell.ends_with("bash.exe") {
+                    explicit_shell = Some((shell, vec!["--login", "-i"]));
+                } else {
+                    explicit_shell = Some((shell, vec![]));
                 }
             }
         }
@@ -51,19 +57,34 @@ impl Terminal {
         let (shell_path, args) = if let Some(explicit) = explicit_shell {
             (explicit.0, explicit.1)
         } else if std::path::Path::new("C:\\Program Files\\Git\\bin\\bash.exe").exists() {
-            ("C:\\Program Files\\Git\\bin\\bash.exe".to_string(), vec!["--login", "-i"])
+            (
+                "C:\\Program Files\\Git\\bin\\bash.exe".to_string(),
+                vec!["--login", "-i"],
+            )
         } else if std::path::Path::new("C:\\Program local\\Git\\bin\\bash.exe").exists() {
-            ("C:\\Program local\\Git\\bin\\bash.exe".to_string(), vec!["--login", "-i"])
-        } else if std::process::Command::new("bash").arg("--version").output().is_ok() {
+            (
+                "C:\\Program local\\Git\\bin\\bash.exe".to_string(),
+                vec!["--login", "-i"],
+            )
+        } else if std::process::Command::new("bash")
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
             ("bash".to_string(), vec!["--login", "-i"])
-        } else if std::process::Command::new("powershell").arg("-Command").arg("exit").output().is_ok() {
+        } else if std::process::Command::new("powershell")
+            .arg("-Command")
+            .arg("exit")
+            .output()
+            .is_ok()
+        {
             ("powershell.exe".to_string(), vec![])
         } else {
             // Ultimate fallback
             ("cmd.exe".to_string(), vec![])
         };
 
-        let mut cmd = CommandBuilder::new(shell_path); 
+        let mut cmd = CommandBuilder::new(shell_path);
         cmd.args(&args);
         cmd.env("TERM", "xterm-256color");
         cmd.cwd(cwd);
@@ -90,10 +111,10 @@ impl Terminal {
                 if out.len() > 10000 {
                     let split_idx = out.len() - 5000;
                     // Find a safe UTF-8 boundary
-                    let safe_idx = out.char_indices()
+                    let safe_idx = out
+                        .char_indices()
                         .map(|(i, _)| i)
-                        .filter(|&i| i >= split_idx)
-                        .next()
+                        .find(|&i| i >= split_idx)
                         .unwrap_or(out.len());
                     *out = out[safe_idx..].to_string();
                 }
