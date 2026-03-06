@@ -167,4 +167,4 @@ Please read our [Contributing Guidelines](CONTRIBUTING.md) to understand the wor
 
 ## 📜 License
 
-Klein TIDE is open‑sourced software licensed under the [MIT license](LICENSE).
+Klein TIDE is open‑sourced software licensed under the [Apache 2.0](LICENSE).
