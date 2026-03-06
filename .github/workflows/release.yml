@@ -1,0 +1,348 @@
+name: Release
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trigger: manual only (via the Actions UI or `gh workflow run release.yml`)
+#
+#   gh workflow run release.yml \
+#     [-f dry_run=true] \
+#     [-f force_bump=minor]
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >
+          Dry run — detect & print next version but skip tag creation
+          and release upload.
+        type: boolean
+        default: false
+      force_bump:
+        description: >
+          Override the automatic conventional-commit bump detection.
+          'auto' uses commit analysis (NX-style).
+        type: choice
+        default: auto
+        options: [auto, patch, minor, major]
+
+permissions:
+  contents: write   # needed to push tags and create releases
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 1 — Detect next version from conventional commits
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  detect-version:
+    name: Detect next version
+    runs-on: ubuntu-latest
+    outputs:
+      new_version:  ${{ steps.version.outputs.new_version }}
+      previous_tag: ${{ steps.version.outputs.previous_tag }}
+      bump_type:    ${{ steps.version.outputs.bump_type }}
+      skip:         ${{ steps.version.outputs.skip }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for tag discovery and commit analysis
+
+      # ── Conventional-commit version detection (NX-style algorithm) ──────────
+      # Rules (highest winning):
+      #   BREAKING CHANGE / <type>!:  → major bump
+      #   feat:                       → minor bump
+      #   fix: / other:               → patch bump
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Analyze commits and compute next version
+        id: version
+        run: |
+          set -euo pipefail
+
+          # ── Find the latest semver tag ─────────────────────────────────────
+          LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' \
+            | sort -t. -k1,1V -k2,2V -k3,3V \
+            | tail -n1 || true)
+
+          if [[ -z "${LATEST_TAG}" ]]; then
+            LATEST_VERSION="0.0.0"
+            COMMIT_RANGE="HEAD"
+            echo "ℹ No previous semver tags — starting from v0.0.0"
+          else
+            LATEST_VERSION="${LATEST_TAG#v}"
+            COMMIT_RANGE="${LATEST_TAG}..HEAD"
+            echo "ℹ Latest tag: ${LATEST_TAG}"
+          fi
+
+          # ── Collect commits since the last tag ─────────────────────────────
+          COMMITS=$(git log --format='%s%n%b' ${COMMIT_RANGE} 2>/dev/null || true)
+
+          if [[ -z "$(echo "${COMMITS}" | tr -d '[:space:]')" ]]; then
+            echo "✓ No commits since last tag — nothing to release"
+            {
+              echo "skip=true"
+              echo "new_version=${LATEST_TAG:-v0.0.0}"
+              echo "previous_tag=${LATEST_TAG:-}"
+              echo "bump_type=none"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # ── Determine bump type ────────────────────────────────────────────
+          FORCE="${{ inputs.force_bump }}"
+          if [[ "${FORCE}" != "auto" ]]; then
+            BUMP="${FORCE}"
+            echo "ℹ Bump type forced to: ${BUMP}"
+          else
+            BUMP="patch"
+            while IFS= read -r line; do
+              # Breaking change: type(scope)!: ... or BREAKING CHANGE: footer
+              if [[ "${line}" =~ ^[a-zA-Z]+(\([^)]*\))?![[:space:]]*: ]] \
+                || [[ "${line}" =~ ^BREAKING[[:space:]]CHANGE ]]; then
+                BUMP="major"
+                break
+              fi
+              # New feature
+              if [[ "${line}" =~ ^feat(\([^)]*\))?[[:space:]]*: ]]; then
+                [[ "${BUMP}" != "major" ]] && BUMP="minor"
+              fi
+            done <<< "${COMMITS}"
+            echo "ℹ Auto-detected bump type: ${BUMP}"
+          fi
+
+          # ── Calculate new semver ───────────────────────────────────────────
+          IFS='.' read -r -a PARTS <<< "${LATEST_VERSION}"
+          MAJOR="${PARTS[0]:-0}"
+          MINOR="${PARTS[1]:-0}"
+          PATCH="${PARTS[2]:-0}"
+
+          case "${BUMP}" in
+            major) MAJOR=$(( MAJOR + 1 )); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$(( MINOR + 1 )); PATCH=0           ;;
+            patch) PATCH=$(( PATCH + 1 ))                    ;;
+          esac
+
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "✓ Next version: ${NEW_VERSION}  (${BUMP} bump)"
+
+          {
+            echo "skip=false"
+            echo "new_version=${NEW_VERSION}"
+            echo "previous_tag=${LATEST_TAG:-}"
+            echo "bump_type=${BUMP}"
+          } >> "${GITHUB_OUTPUT}"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2 — Cross-platform build matrix
+  # ─────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build — ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs: detect-version
+    if: needs.detect-version.outputs.skip != 'true'
+    env:
+      VERSION: ${{ needs.detect-version.outputs.new_version }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Linux ──────────────────────────────────────────────────────────
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            artifact_name: klein          # binary name inside archive
+            archive_ext: .tar.gz
+
+          - os: ubuntu-24.04-arm          # native arm64 runner
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            artifact_name: klein
+            archive_ext: .tar.gz
+
+          # ── macOS ──────────────────────────────────────────────────────────
+          - os: macos-13                  # Intel x86_64 runner
+            target: x86_64-apple-darwin
+            platform: darwin
+            artifact_name: klein
+            archive_ext: .tar.gz
+
+          - os: macos-latest             # Apple Silicon arm64 runner
+            target: aarch64-apple-darwin
+            platform: darwin
+            artifact_name: klein
+            archive_ext: .tar.gz
+
+          # ── Windows ────────────────────────────────────────────────────────
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            artifact_name: klein.exe
+            archive_ext: .zip
+
+          - os: windows-latest           # cross-compile arm64 on x86_64 MSVC
+            target: aarch64-pc-windows-msvc
+            platform: windows
+            artifact_name: klein.exe
+            archive_ext: .zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # ── Linux system libraries (arboard X11 clipboard, openssl) ────────────
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libssl-dev \
+            pkg-config
+
+      # ── Build ──────────────────────────────────────────────────────────────
+      - name: Build (Linux / macOS)
+        if: matrix.platform != 'windows'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # ── Package ────────────────────────────────────────────────────────────
+      #   Archive name: klein-<version>-<target>.(tar.gz|zip)
+      #   This pattern is recognised by mise's ubi backend for auto-detection.
+      - name: Package archive (Linux / macOS)
+        if: matrix.platform != 'windows'
+        run: |
+          ARCHIVE="klein-${VERSION}-${{ matrix.target }}${{ matrix.archive_ext }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" ./klein
+          tar czf "${ARCHIVE}" klein
+          rm klein
+          echo "ARCHIVE=${ARCHIVE}" >> "${GITHUB_ENV}"
+
+      - name: Package archive (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $archive = "klein-$env:VERSION-${{ matrix.target }}${{ matrix.archive_ext }}"
+          Compress-Archive `
+            -Path "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" `
+            -DestinationPath $archive
+          "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: klein-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3 — Create git tag + GitHub Release (skipped on dry-run)
+  # ─────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [detect-version, build]
+    if: >-
+      needs.detect-version.outputs.skip != 'true' &&
+      inputs.dry_run != true
+
+    env:
+      VERSION:      ${{ needs.detect-version.outputs.new_version }}
+      PREVIOUS_TAG: ${{ needs.detect-version.outputs.previous_tag }}
+      BUMP_TYPE:    ${{ needs.detect-version.outputs.bump_type }}
+      GH_TOKEN:     ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Download all build archives ────────────────────────────────────────
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: List release artifacts
+        run: find dist/ -type f | sort
+
+      # ── Generate changelog with git-cliff ─────────────────────────────────
+      - name: Install git-cliff
+        run: |
+          CLIFF_VERSION="2.6.1"
+          curl -sSL \
+            "https://github.com/orhun/git-cliff/releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz --strip-components=1 git-cliff-${CLIFF_VERSION}/git-cliff
+          chmod +x git-cliff
+          sudo mv git-cliff /usr/local/bin/git-cliff
+
+      - name: Generate release changelog
+        run: |
+          if [[ -n "${PREVIOUS_TAG}" ]]; then
+            git-cliff "${PREVIOUS_TAG}..HEAD" \
+              --config cliff.toml \
+              --tag "${VERSION}" \
+              --output RELEASE_NOTES.md
+          else
+            git-cliff \
+              --config cliff.toml \
+              --tag "${VERSION}" \
+              --output RELEASE_NOTES.md
+          fi
+          echo "── Release notes preview ──────────────────────"
+          cat RELEASE_NOTES.md
+
+      # ── Create and push the version tag ───────────────────────────────────
+      - name: Create and push tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${VERSION}" -m "Release ${VERSION} (${BUMP_TYPE} bump)"
+          git push origin "${VERSION}"
+
+      # ── Create GitHub Release with all platform archives ──────────────────
+      - name: Create GitHub Release
+        run: |
+          gh release create "${VERSION}" \
+            --title "Klein ${VERSION}" \
+            --notes-file RELEASE_NOTES.md \
+            dist/*.tar.gz \
+            dist/*.zip
+
+      # ── Summary ───────────────────────────────────────────────────────────
+      - name: Release summary
+        run: |
+          echo "## Release ${VERSION} created 🎉" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "**Bump type:** ${BUMP_TYPE}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "### Artifacts" >> "${GITHUB_STEP_SUMMARY}"
+          for f in dist/*; do
+            SIZE=$(du -sh "$f" | cut -f1)
+            echo "- \`$(basename $f)\` (${SIZE})" >> "${GITHUB_STEP_SUMMARY}"
+          done
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "### Install via mise" >> "${GITHUB_STEP_SUMMARY}"
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          echo "mise use -g ubi:tobiashochguertel/Klein" >> "${GITHUB_STEP_SUMMARY}"
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
