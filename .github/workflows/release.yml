@@ -163,13 +163,15 @@ jobs:
             archive_ext: .tar.gz
 
           # ── macOS ──────────────────────────────────────────────────────────
-          - os: macos-13                  # Intel x86_64 runner
+          # macos-13 (Intel) is retired; cross-compile x86_64 from arm64 runner.
+          # Apple Silicon can cross-compile to x86_64 via the bundled macOS SDK.
+          - os: macos-latest             # Apple Silicon arm64 → cross-compile Intel
             target: x86_64-apple-darwin
             platform: darwin
             artifact_name: klein
             archive_ext: .tar.gz
 
-          - os: macos-latest             # Apple Silicon arm64 runner
+          - os: macos-latest             # Apple Silicon arm64 native
             target: aarch64-apple-darwin
             platform: darwin
             artifact_name: klein
