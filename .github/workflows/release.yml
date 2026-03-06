@@ -99,13 +99,13 @@ jobs:
             BUMP="patch"
             while IFS= read -r line; do
               # Breaking change: type(scope)!: ... or BREAKING CHANGE: footer
-              if [[ "${line}" =~ ^[a-zA-Z]+(\([^)]*\))?![[:space:]]*: ]] \
-                || [[ "${line}" =~ ^BREAKING[[:space:]]CHANGE ]]; then
+              if echo "${line}" | grep -qE '^[a-zA-Z]+(\([^)]*\))?!(\([^)]*\))?:' \
+                || echo "${line}" | grep -qE '^BREAKING[[:space:]]CHANGE'; then
                 BUMP="major"
                 break
               fi
               # New feature
-              if [[ "${line}" =~ ^feat(\([^)]*\))?[[:space:]]*: ]]; then
+              if echo "${line}" | grep -qE '^feat(\([^)]*\))?:'; then
                 [[ "${BUMP}" != "major" ]] && BUMP="minor"
               fi
             done <<< "${COMMITS}"
