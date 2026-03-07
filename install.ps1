@@ -92,7 +92,7 @@ if ($Reconfigure) {
 Write-Host "`n╭────────────┤ Installation ├────────────╮" -ForegroundColor $Cyan
 
 $exePath = "$AppDir\klein.exe"
-$downloadUrl = "https://github.com/Adarsh-codesOP/Klein/releases/download/stable/klein-windows-x86_64.exe"
+$downloadUrl = "https://github.com/Adarsh-codesOP/Klein/releases/download/v0.2.5/klein-windows-x86_64.exe"
 
 try {
     Write-Host "Downloading pre-compiled binary from GitHub Releases..." -ForegroundColor $Yellow

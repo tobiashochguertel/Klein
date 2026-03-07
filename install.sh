@@ -96,9 +96,9 @@ DOWNLOAD_URL=""
 # Set download URL based on OS and architecture
 if [[ "$OS" == "Linux" ]]; then
     if [[ "$ARCH" == "x86_64" ]]; then
-        DOWNLOAD_URL="https://github.com/Adarsh-codesOP/Klein/releases/download/stable/klein-linux-x86_64"
+        DOWNLOAD_URL="https://github.com/Adarsh-codesOP/Klein/releases/download/v0.2.5/klein-linux-x86_64"
     elif [[ "$ARCH" == "aarch64" ]]; then
-        DOWNLOAD_URL="https://github.com/Adarsh-codesOP/Klein/releases/download/stable/klein-linux-aarch64"
+        DOWNLOAD_URL="https://github.com/Adarsh-codesOP/Klein/releases/download/v0.2.5/klein-linux-aarch64"
     fi
 elif [[ "$OS" == "Darwin" ]]; then
     echo -e "${YELLOW}Warning: macOS support is not yet available.${NC}"
