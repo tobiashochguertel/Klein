@@ -287,7 +287,12 @@ function Add-ToPath {
         }
         $exportLine = "export PATH=""$BinDir"":$env:PATH"
         $marker     = "# klein PATH"
-        if (-not (Select-String -Path $rcFile -Pattern ([regex]::Escape($BinDir)) -Quiet -ErrorAction SilentlyContinue)) {
+        # Create RC file if it doesn't exist (containers/CI may have empty $HOME)
+        if (-not (Test-Path $rcFile)) {
+            New-Item -Path $rcFile -ItemType File -Force | Out-Null
+        }
+        $alreadySet = Select-String -Path $rcFile -Pattern ([regex]::Escape($BinDir)) -Quiet -ErrorAction SilentlyContinue
+        if (-not $alreadySet) {
             Add-Content -Path $rcFile -Value "`n$marker`n$exportLine"
             Write-Host "Added $BinDir to PATH in $rcFile" -ForegroundColor $Green
             Write-Host "Restart your terminal or run: export PATH=""$BinDir"":$env:PATH" -ForegroundColor $Yellow
