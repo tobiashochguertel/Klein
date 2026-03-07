@@ -68,6 +68,37 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  update-version:
+    name: Update Version in Cargo.toml
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract and Update Version
+        run: |
+          # Extract version from tag (e.g., v0.2.0 -> 0.2.0)
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION=${VERSION#v}
+          
+          # Update Cargo.toml
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          
+          # Verify the change
+          echo "Updated Cargo.toml to version: $VERSION"
+          grep "^version" Cargo.toml
+
+      - name: Commit and Push Version Update
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add Cargo.toml
+          git commit -m "chore: bump version to ${{ github.event.release.tag_name }}" || true
+          git push origin main
+
   update-install-scripts:
     name: Update Install Scripts
     needs: build
