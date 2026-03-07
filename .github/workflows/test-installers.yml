@@ -1,0 +1,129 @@
+name: Test Installers
+
+# Tests install.sh and install.ps1 across platforms to catch regressions.
+# Triggered manually or on changes to the installer scripts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "GitHub repo to install from (owner/repo)"
+        required: false
+        default: ""
+  push:
+    paths:
+      - "install.sh"
+      - "install.ps1"
+  pull_request:
+    paths:
+      - "install.sh"
+      - "install.ps1"
+
+jobs:
+  # ── install.sh — Linux ────────────────────────────────────────────────────
+  test-install-sh-linux:
+    name: "install.sh / ${{ matrix.os }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: "Ubuntu 22.04"
+            image: "ubuntu:22.04"
+            pkg_install: "apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates git"
+          - os: "Debian Bookworm"
+            image: "debian:bookworm-slim"
+            pkg_install: "apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates git"
+          - os: "Alpine 3.19"
+            image: "alpine:3.19"
+            pkg_install: "apk add --quiet bash curl ca-certificates git"
+            shell_cmd: "sh"
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install prerequisites
+        run: ${{ matrix.pkg_install }}
+        shell: ${{ matrix.shell_cmd || 'bash' }} -e {0}
+
+      - name: Run install.sh --yes
+        env:
+          REPO: ${{ inputs.repo || github.repository }}
+        run: bash install.sh --yes
+        shell: bash
+
+      - name: Verify binary exists
+        run: |
+          BIN=$(find "$HOME" -name 'klein' -type f 2>/dev/null | head -1 || true)
+          if [ -z "$BIN" ]; then
+            echo "✗ FAIL: klein binary not found"
+            exit 1
+          fi
+          echo "✔ PASS: $BIN"
+        shell: bash
+
+  # ── install.sh — macOS ────────────────────────────────────────────────────
+  test-install-sh-macos:
+    name: "install.sh / macOS (amd64)"
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run install.sh --yes
+        env:
+          REPO: ${{ inputs.repo || github.repository }}
+        run: bash install.sh --yes
+      - name: Verify binary exists
+        run: |
+          BIN=$(find "$HOME" -name 'klein' -type f 2>/dev/null | head -1 || true)
+          if [ -z "$BIN" ]; then
+            echo "✗ FAIL: klein binary not found"
+            exit 1
+          fi
+          echo "✔ PASS: $BIN"
+
+  # ── install.ps1 — Linux (PowerShell Core) ────────────────────────────────
+  test-install-ps1-linux:
+    name: "install.ps1 / Linux (pwsh)"
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/powershell:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run install.ps1 -Yes
+        env:
+          REPO: ${{ inputs.repo || github.repository }}
+        shell: pwsh
+        run: |
+          ./install.ps1 -Yes
+      - name: Verify binary exists
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem -Path $HOME -Filter 'klein' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $bin) {
+            Write-Host "✗ FAIL: klein binary not found" -ForegroundColor Red
+            exit 1
+          }
+          Write-Host ("✔ PASS: " + $bin.FullName) -ForegroundColor Green
+
+  # ── install.ps1 — Windows ─────────────────────────────────────────────────
+  test-install-ps1-windows:
+    name: "install.ps1 / Windows (amd64)"
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run install.ps1 -Yes
+        env:
+          REPO: ${{ inputs.repo || github.repository }}
+        shell: pwsh
+        run: |
+          ./install.ps1 -Yes
+      - name: Verify binary exists
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem -Path "$env:LOCALAPPDATA\Klein" -Filter 'klein.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $bin) {
+            Write-Host "✗ FAIL: klein.exe not found" -ForegroundColor Red
+            exit 1
+          }
+          Write-Host ("✔ PASS: " + $bin.FullName) -ForegroundColor Green

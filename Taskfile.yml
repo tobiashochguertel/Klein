@@ -247,12 +247,48 @@ tasks:
           "
 
   test:install:all:
-    desc: "Run install.sh Docker tests on Ubuntu, Debian, and Alpine"
+    desc: "Run install.sh Docker tests on Ubuntu, Debian, and Alpine; and install.ps1 on PowerShell/Linux"
     summary: |
-      Runs all three Linux Docker tests sequentially.
+      Runs all Linux Docker tests (bash + PowerShell) sequentially.
       Override the test repo with: TEST_REPO=owner/repo
     cmds:
       - task: test:install:ubuntu
       - task: test:install:debian
       - task: test:install:alpine
+      - task: test:install:pwsh
       - echo "✔ All Docker install tests passed!"
+
+  test:install:pwsh:
+    desc: "Test install.ps1 in a PowerShell/Linux container (cross-platform logic)"
+    summary: |
+      Runs install.ps1 inside mcr.microsoft.com/powershell (Linux, amd64).
+      This verifies the script logic, API calls, and Linux download path.
+      True Windows validation requires a Windows runner (see test:install:windows-ci).
+
+      Requirements: Docker must be running. --platform linux/amd64 is used since
+      the PowerShell image is amd64-only (no arm64 variant).
+
+      Override the target repo with: TEST_REPO=owner/repo
+    cmds:
+      - |
+        echo "▶ Testing install.ps1 on PowerShell/Linux (repo: {{.TEST_REPO}})"
+        docker run --rm \
+          --platform linux/amd64 \
+          --volume "{{.ROOT_DIR}}:/klein:ro" \
+          --env REPO="{{.TEST_REPO}}" \
+          mcr.microsoft.com/powershell:latest \
+          pwsh -Command "
+            Set-StrictMode -Version Latest
+            \$ErrorActionPreference = 'Stop'
+            Copy-Item -Recurse /klein /tmp/klein-src
+            Set-Location /tmp/klein-src
+            & ./install.ps1 -Yes
+            \$p1 = \$HOME + '/.local/bin/klein'
+            \$candidates = @(\$p1, '/usr/local/bin/klein') |
+              Where-Object { \$_ -and (Test-Path \$_) }
+            if (-not \$candidates) {
+              Write-Host '✗ FAIL: klein binary not found after install' -ForegroundColor Red
+              exit 1
+            }
+            Write-Host ('✔ PASS: klein binary found at ' + \$candidates[0]) -ForegroundColor Green
+          "
