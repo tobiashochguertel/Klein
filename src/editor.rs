@@ -306,7 +306,8 @@ impl Editor {
     }
 
     fn get_max_cursor_x(&self, line_y: usize) -> usize {
-        if self.buffer.len_lines() == 0 {
+        let total_lines = self.buffer.len_lines();
+        if total_lines == 0 || line_y >= total_lines {
             return 0;
         }
         let line = self.buffer.line(line_y);
