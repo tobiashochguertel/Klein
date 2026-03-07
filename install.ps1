@@ -6,7 +6,9 @@ param (
 $ErrorActionPreference = "Stop"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Klein — Windows installer (PowerShell)
+# Klein — cross-platform installer (PowerShell Core 7+)
+#
+# Supports: Windows, Linux, macOS
 #
 # Usage:
 #   irm https://raw.githubusercontent.com/<owner>/Klein/main/install.ps1 | iex
@@ -18,16 +20,25 @@ $ErrorActionPreference = "Stop"
 #   $env:REPO = "owner/repo"   # defaults to upstream or auto-detected from git remote
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Platform detection ───────────────────────────────────────────────────────
+$OnWindows = $IsWindows -or ($PSVersionTable.PSEdition -eq "Desktop")
+$OnMacOS   = [bool]$IsMacOS
+$OnLinux   = [bool]$IsLinux
+
 # ── Repository detection ─────────────────────────────────────────────────────
 function Get-Repo {
     $scriptDir = Split-Path -Parent $MyInvocation.ScriptName
-    if ($scriptDir -and (Test-Path "$scriptDir\.git" -ErrorAction SilentlyContinue)) {
-        try {
-            $remoteUrl = git -C $scriptDir remote get-url origin 2>$null
-            if ($remoteUrl -match 'github\.com[:/]([^/]+/[^/]+?)(\.git)?$') {
-                return $Matches[1]
-            }
-        } catch {}
+    $sep = if ($OnWindows) { "\" } else { "/" }
+    if ($scriptDir) {
+        $gitDir = Join-Path $scriptDir ".git"
+        if (Test-Path $gitDir -ErrorAction SilentlyContinue) {
+            try {
+                $remoteUrl = git -C $scriptDir remote get-url origin 2>$null
+                if ($remoteUrl -match 'github\.com[:/]([^/]+/[^/]+?)(\.git)?$') {
+                    return $Matches[1]
+                }
+            } catch {}
+        }
     }
     return "Adarsh-codesOP/Klein"
 }
@@ -35,12 +46,24 @@ $Repo = if ($env:REPO) { $env:REPO } else { Get-Repo }
 $RepoOwner = $Repo.Split("/")[0]
 $RepoName  = $Repo.Split("/")[1]
 
-# ── Paths ────────────────────────────────────────────────────────────────────
-$AppDir     = "$env:LOCALAPPDATA\Klein"
-$BinDir     = $AppDir
-$ConfigPath = "$AppDir\config.toml"
-$BinName    = "klein.exe"
-$BinPath    = "$BinDir\$BinName"
+# ── Paths (platform-aware) ───────────────────────────────────────────────────
+if ($OnWindows) {
+    $AppDir     = "$env:LOCALAPPDATA\Klein"
+    $BinDir     = $AppDir
+    $ConfigPath = "$AppDir\config.toml"
+    $BinName    = "klein.exe"
+    $TmpRoot    = $env:TEMP
+    $HomeDir    = $env:USERPROFILE
+} else {
+    $HomeDir    = $env:HOME
+    $AppDir     = "$HomeDir/.local/share/klein"
+    $BinDir     = "$HomeDir/.local/bin"
+    $ConfigDir  = if ($OnMacOS) { "$HomeDir/Library/Application Support/klein" } else { "$HomeDir/.config/klein" }
+    $ConfigPath = "$ConfigDir/config.toml"
+    $BinName    = "klein"
+    $TmpRoot    = if ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
+}
+$BinPath = Join-Path $BinDir $BinName
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 $Cyan = "Cyan"; $White = "White"; $Green = "Green"
@@ -69,13 +92,31 @@ function Get-LatestVersion {
 }
 
 function Get-TargetTriple {
-    # Determine Rust target triple for the current Windows architecture.
-    # Asset naming: klein-<version>-<triple>.zip
-    $arch = $env:PROCESSOR_ARCHITECTURE
-    switch ($arch) {
-        "AMD64"  { return "x86_64-pc-windows-msvc" }
-        "ARM64"  { return "aarch64-pc-windows-msvc" }
-        default  { return "x86_64-pc-windows-msvc" }  # safe default
+    # Determine Rust target triple for the current platform.
+    # Asset naming: klein-<version>-<triple>.<zip|tar.gz>
+    if ($OnWindows) {
+        $arch = $env:PROCESSOR_ARCHITECTURE
+        switch ($arch) {
+            "AMD64"  { return "x86_64-pc-windows-msvc" }
+            "ARM64"  { return "aarch64-pc-windows-msvc" }
+            default  { return "x86_64-pc-windows-msvc" }
+        }
+    } elseif ($OnMacOS) {
+        $arch = (uname -m).Trim()
+        switch ($arch) {
+            "arm64"  { return "aarch64-apple-darwin" }
+            "x86_64" { return "x86_64-apple-darwin" }
+            default  { return "x86_64-apple-darwin" }
+        }
+    } else {
+        # Linux
+        $arch = (uname -m).Trim()
+        switch ($arch) {
+            "aarch64" { return "aarch64-unknown-linux-gnu" }
+            "arm64"   { return "aarch64-unknown-linux-gnu" }
+            "x86_64"  { return "x86_64-unknown-linux-gnu" }
+            default   { return "x86_64-unknown-linux-gnu" }
+        }
     }
 }
 
@@ -101,35 +142,56 @@ function Install-ViaGitHubRelease {
     }
 
     $triple  = Get-TargetTriple
-    $archive = "klein-$version-$triple.zip"
-    $url     = "https://github.com/$Repo/releases/download/$version/$archive"
-
-    Write-Host "Downloading $archive ($version)…" -ForegroundColor $Yellow
-    Write-Host "URL: $url" -ForegroundColor $DarkGray
-
-    $tmpDir = Join-Path $env:TEMP "klein-install-$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
-    New-Item -ItemType Directory -Path $tmpDir | Out-Null
+    $tmpDir  = Join-Path $TmpRoot "klein-install-$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
+    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
     try {
-        Invoke-WebRequest -Uri $url -OutFile "$tmpDir\$archive" -ErrorAction Stop
-
-        Expand-Archive -Path "$tmpDir\$archive" -DestinationPath $tmpDir -Force
-
-        $extracted = Get-ChildItem -Path $tmpDir -Filter "klein.exe" -Recurse | Select-Object -First 1
-        if ($extracted) {
-            New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-            Copy-Item -Path $extracted.FullName -Destination $BinPath -Force
-            Write-Host "✔ Installed $version to $BinPath" -ForegroundColor $Green
+        if ($OnWindows) {
+            $archive = "klein-$version-$triple.zip"
+            $url     = "https://github.com/$Repo/releases/download/$version/$archive"
+            Write-Host "Downloading $archive ($version)…" -ForegroundColor $Yellow
+            Write-Host "URL: $url" -ForegroundColor $DarkGray
+            Invoke-WebRequest -Uri $url -OutFile "$tmpDir/$archive" -ErrorAction Stop
+            Expand-Archive -Path "$tmpDir/$archive" -DestinationPath $tmpDir -Force
+            $extracted = Get-ChildItem -Path $tmpDir -Filter "klein.exe" -Recurse | Select-Object -First 1
+            if ($extracted) {
+                New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+                Copy-Item -Path $extracted.FullName -Destination $BinPath -Force
+                Write-Host "✔ Installed $version to $BinPath" -ForegroundColor $Green
+                return $true
+            }
+            # Legacy fallback
+            $legacyUrl = "https://github.com/$Repo/releases/download/$version/klein-windows-x86_64.exe"
+            Write-Host "Archive binary not found, trying legacy .exe…" -ForegroundColor $Yellow
+            Invoke-WebRequest -Uri $legacyUrl -OutFile $BinPath -ErrorAction Stop
+            Write-Host "✔ Installed $version (legacy) to $BinPath" -ForegroundColor $Green
+            return $true
+        } else {
+            # Linux / macOS — download .tar.gz
+            $archive = "klein-$version-$triple.tar.gz"
+            $url     = "https://github.com/$Repo/releases/download/$version/$archive"
+            Write-Host "Downloading $archive ($version)…" -ForegroundColor $Yellow
+            Write-Host "URL: $url" -ForegroundColor $DarkGray
+            Invoke-WebRequest -Uri $url -OutFile "$tmpDir/$archive" -ErrorAction Stop
+            & tar -xzf "$tmpDir/$archive" -C $tmpDir
+            $extracted = Get-ChildItem -Path $tmpDir -Filter "klein" | Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
+            if ($extracted) {
+                New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+                Copy-Item -Path $extracted.FullName -Destination $BinPath -Force
+                & chmod +x $BinPath
+                Write-Host "✔ Installed $version to $BinPath" -ForegroundColor $Green
+                return $true
+            }
+            # Legacy fallback (plain binary)
+            $legacyArch = if ($triple -match "aarch64") { "aarch64" } else { "x86_64" }
+            $legacyName = if ($OnMacOS) { "klein-macos-$legacyArch" } else { "klein-linux-$legacyArch" }
+            $legacyUrl  = "https://github.com/$Repo/releases/download/$version/$legacyName"
+            Write-Host "Archive binary not found, trying legacy binary…" -ForegroundColor $Yellow
+            Invoke-WebRequest -Uri $legacyUrl -OutFile $BinPath -ErrorAction Stop
+            & chmod +x $BinPath
+            Write-Host "✔ Installed $version (legacy) to $BinPath" -ForegroundColor $Green
             return $true
         }
-
-        # Fallback: legacy plain-exe naming (klein-windows-x86_64.exe)
-        $legacyUrl = "https://github.com/$Repo/releases/download/$version/klein-windows-x86_64.exe"
-        Write-Host "Archive binary not found, trying legacy .exe…" -ForegroundColor $Yellow
-        Invoke-WebRequest -Uri $legacyUrl -OutFile $BinPath -ErrorAction Stop
-        Write-Host "✔ Installed $version (legacy) to $BinPath" -ForegroundColor $Green
-        return $true
-
     } catch {
         Write-Host "Download failed: $_" -ForegroundColor $Yellow
         return $false
@@ -160,27 +222,35 @@ function Install-FromSource {
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 function Invoke-Configuration {
-    New-Item -ItemType Directory -Path $AppDir -Force | Out-Null
+    if ($OnWindows) {
+        New-Item -ItemType Directory -Path $AppDir -Force | Out-Null
+    } else {
+        New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
+    }
     Write-Host "`n╭────────────┤ Configuration ├────────────╮" -ForegroundColor $Cyan
 
     if ($Yes) {
-        $workspace = $env:USERPROFILE
+        $workspace = $HomeDir
         $shell = "auto"
     } else {
-        $gitBashExists = (Test-Path "C:\Program Files\Git\bin\bash.exe") -or
-                         (Test-Path "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe")
-        if (-not $gitBashExists) {
-            Write-Host "Git Bash not found — install from https://gitforwindows.org/ for best experience." -ForegroundColor $Yellow
+        if ($OnWindows) {
+            $gitBashExists = (Test-Path "C:\Program Files\Git\bin\bash.exe") -or
+                             (Test-Path "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe")
+            if (-not $gitBashExists) {
+                Write-Host "Git Bash not found — install from https://gitforwindows.org/ for best experience." -ForegroundColor $Yellow
+            }
+            $shell = if ($gitBashExists) { "bash" } else { "auto" }
+        } else {
+            $shell = "auto"
         }
 
-        $workspace = Read-Host "Default workspace path (blank = $env:USERPROFILE)"
-        if ([string]::IsNullOrWhiteSpace($workspace)) { $workspace = $env:USERPROFILE }
+        $workspace = Read-Host "Default workspace path (blank = $HomeDir)"
+        if ([string]::IsNullOrWhiteSpace($workspace)) { $workspace = $HomeDir }
 
         if (-not (Test-Path $workspace)) {
             $create = Read-Host "Path '$workspace' does not exist. Create it? (y/N)"
             if ($create -eq 'y') { New-Item -ItemType Directory -Path $workspace | Out-Null }
         }
-        $shell = if ($gitBashExists) { "bash" } else { "auto" }
     }
 
     @"
@@ -188,25 +258,48 @@ function Invoke-Configuration {
 default_workspace = "$workspace"
 shell = "$shell"
 "@ | Out-File -FilePath $ConfigPath -Encoding utf8
-    Write-Host "Configuration saved to $ConfigPath" -ForegroundColor $Green
+    Write-Host "Configuration written to $ConfigPath" -ForegroundColor $Green
 }
 
 # ── PATH setup ────────────────────────────────────────────────────────────────
 
 function Add-ToPath {
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($userPath -notmatch [regex]::Escape($BinDir)) {
-        [Environment]::SetEnvironmentVariable("Path", "$userPath;$BinDir", "User")
-        Write-Host "Added $BinDir to User PATH." -ForegroundColor $Green
-        Write-Host "Restart your terminal to use 'klein' globally." -ForegroundColor $Yellow
+    if ($OnWindows) {
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($userPath -notmatch [regex]::Escape($BinDir)) {
+            [Environment]::SetEnvironmentVariable("Path", "$userPath;$BinDir", "User")
+            Write-Host "Added $BinDir to User PATH." -ForegroundColor $Green
+            Write-Host "Restart your terminal to use 'klein' globally." -ForegroundColor $Yellow
+        }
+    } else {
+        # Determine shell RC file from $SHELL env var (may be empty in containers)
+        $shellEnv = $env:SHELL
+        $shell    = if ($shellEnv) { Split-Path -Leaf $shellEnv } else { "" }
+        $rcFile = switch ($shell) {
+            "zsh"  { "$HomeDir/.zshrc" }
+            "bash" { "$HomeDir/.bashrc" }
+            "fish" { "$HomeDir/.config/fish/config.fish" }
+            default {
+                # Prefer .bashrc if bash is present, else .profile
+                if (Get-Command bash -ErrorAction SilentlyContinue) { "$HomeDir/.bashrc" }
+                else { "$HomeDir/.profile" }
+            }
+        }
+        $exportLine = "export PATH=""$BinDir"":$env:PATH"
+        $marker     = "# klein PATH"
+        if (-not (Select-String -Path $rcFile -Pattern ([regex]::Escape($BinDir)) -Quiet -ErrorAction SilentlyContinue)) {
+            Add-Content -Path $rcFile -Value "`n$marker`n$exportLine"
+            Write-Host "Added $BinDir to PATH in $rcFile" -ForegroundColor $Green
+            Write-Host "Restart your terminal or run: export PATH=""$BinDir"":$env:PATH" -ForegroundColor $Yellow
+        }
     }
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 Write-Host "Starting installation (repo: $Repo)…" -ForegroundColor $Yellow
-New-Item -ItemType Directory -Path $AppDir  -Force | Out-Null
-New-Item -ItemType Directory -Path $BinDir  -Force | Out-Null
+New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+if ($OnWindows) { New-Item -ItemType Directory -Path $AppDir -Force | Out-Null }
 
 if ($Reconfigure) {
     Invoke-Configuration
