@@ -10,6 +10,10 @@ on:
         required: true
         default: 'stable'
 
+# Add permissions for GitHub token
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -54,8 +58,8 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: cross build --release --target ${{ matrix.target }}
 
-      - name: Strip binary (Linux only)
-        if: runner.os == 'Linux'
+      - name: Strip binary (Linux x86_64 only - native builds)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
@@ -65,100 +69,11 @@ jobs:
           cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} ${{ matrix.asset_name }}
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.asset_name }}
           tag_name: ${{ github.event.release.tag_name || inputs.version }}
-          overwrite: true
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  update-version:
-    name: Update Version in Cargo.toml
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release'
-    
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract and Update Version
-        run: |
-          # Extract version from tag (e.g., v0.2.0 -> 0.2.0)
-          VERSION="${{ github.event.release.tag_name }}"
-          VERSION=${VERSION#v}
-          
-          # Update Cargo.toml
-          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
-          
-          # Verify the change
-          echo "Updated Cargo.toml to version: $VERSION"
-          grep "^version" Cargo.toml
-
-      - name: Commit and Push Version Update
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add Cargo.toml
-          git commit -m "chore: bump version to ${{ github.event.release.tag_name }}" || true
-          git push
-
-  update-install-scripts:
-    name: Update Install Scripts
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event.release.tag_name == 'stable' || inputs.version == 'stable'
-    
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update install.ps1
-        run: |
-          sed -i 's|releases/download/[^/]*/klein.exe|releases/download/stable/klein.exe|g' install.ps1
-
-      - name: Update install.sh
-        run: |
-          sed -i 's|releases/download/[^/]*/klein.exe|releases/download/stable/klein.exe|g' install.sh
-          sed -i 's|releases/download/[^/]*/klein|releases/download/stable/klein-linux-x86_64|g' install.sh
-
-      - name: Commit and push changes
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add install.ps1 install.sh
-          git commit -m "ci: Update install scripts to point to stable release" --allow-empty || true
-          git push
-
-  publish-release:
-    name: Publish Release Notes
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release'
-    
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Create release summary
-        run: |
-          echo "## Klein Binary Release" > release_notes.md
-          echo "" >> release_notes.md
-          echo "### Available Downloads:" >> release_notes.md
-          echo "- **Windows x86_64**: \`klein-windows-x86_64.exe\`" >> release_notes.md
-          echo "- **Linux x86_64**: \`klein-linux-x86_64\`" >> release_notes.md
-          echo "- **Linux ARM64**: \`klein-linux-aarch64\`" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Installation:" >> release_notes.md
-          echo "Download the appropriate binary for your platform and add it to your PATH." >> release_notes.md
-
-      - name: Update release notes
-        uses: softprops/action-gh-release@v1
-        with:
-          body_path: release_notes.md
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
