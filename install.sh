@@ -85,26 +85,72 @@ if [[ "$1" == "--reconfigure" || "$1" == "-Reconfigure" ]]; then
     exit 0
 fi
 
-echo -e "\n--- Installation ---"
-EXE_PATH="$APP_DIR/klein.exe"
+echo -e "\n${CYAN}╭────────────┤ Installation ├────────────╮${NC}"
 
-echo "Downloading pre-compiled binary from GitHub Releases..."
-if curl -fsSL "https://github.com/Adarsh-codesOP/Klein/releases/download/stable/klein.exe" -o "$EXE_PATH"; then
-    chmod +x "$EXE_PATH"
-    echo -e "Successfully downloaded to $EXE_PATH"
-    
-    BASHRC="$HOME/.bashrc"
-    if [ -f "$BASHRC" ] && ! grep -q "$APP_DIR" "$BASHRC"; then
-        echo -e "\nexport PATH=\"\$PATH:$APP_DIR\"" >> "$BASHRC"
-        echo "Added $APP_DIR to PATH in $BASHRC."
-        echo "Please run 'source ~/.bashrc' or restart your terminal to use the 'klein' command globally."
-    elif [ ! -f "$BASHRC" ]; then
-        echo -e "export PATH=\"\$PATH:$APP_DIR\"" >> "$BASHRC"
-        echo "Created $BASHRC and added $APP_DIR to PATH."
-        echo "Please run 'source ~/.bashrc' or restart your terminal to use the 'klein' command globally."
+# Detect OS and architecture
+OS=$(uname -s)
+ARCH=$(uname -m)
+BIN_NAME="klein"
+DOWNLOAD_URL=""
+
+# Set download URL based on OS and architecture
+if [[ "$OS" == "Linux" ]]; then
+    if [[ "$ARCH" == "x86_64" ]]; then
+        DOWNLOAD_URL="https://github.com/Adarsh-codesOP/Klein/releases/download/stable/klein-linux-x86_64"
+    elif [[ "$ARCH" == "aarch64" ]]; then
+        DOWNLOAD_URL="https://github.com/Adarsh-codesOP/Klein/releases/download/stable/klein-linux-aarch64"
     fi
+elif [[ "$OS" == "Darwin" ]]; then
+    echo -e "${YELLOW}Warning: macOS support is not yet available.${NC}"
+    echo "Please build from source: cargo install --path ."
+    exit 1
+fi
+
+if [ -z "$DOWNLOAD_URL" ]; then
+    echo -e "${YELLOW}Unsupported OS/Architecture: $OS $ARCH${NC}"
+    echo "Please build from source: cargo install --path ."
+    exit 1
+fi
+
+BIN_PATH="$APP_DIR/$BIN_NAME"
+
+echo -e "${YELLOW}Downloading Klein binary for $OS $ARCH...${NC}"
+echo -e "URL: $DOWNLOAD_URL"
+
+if curl -fsSL "$DOWNLOAD_URL" -o "$BIN_PATH"; then
+    chmod +x "$BIN_PATH"
+    echo -e "${GREEN}Successfully downloaded to $BIN_PATH${NC}"
+    
+    # Add to PATH
+    BASHRC="$HOME/.bashrc"
+    ZSHRC="$HOME/.zshrc"
+    
+    for RC_FILE in "$BASHRC" "$ZSHRC"; do
+        if [ -f "$RC_FILE" ] && ! grep -q "$APP_DIR" "$RC_FILE"; then
+            echo -e "\nexport PATH=\"\$PATH:$APP_DIR\"" >> "$RC_FILE"
+            echo -e "${GREEN}Added $APP_DIR to PATH in $RC_FILE${NC}"
+        elif [ ! -f "$RC_FILE" ] && [ "$RC_FILE" = "$BASHRC" ]; then
+            echo -e "export PATH=\"\$PATH:$APP_DIR\"" > "$RC_FILE"
+            echo -e "${GREEN}Created $RC_FILE and added $APP_DIR to PATH${NC}"
+        fi
+    done
+    
+    echo -e "${YELLOW}Please run 'source ~/.bashrc' or restart your terminal to use the 'klein' command globally.${NC}"
 else
-    echo "Failed to download the executable. Please install Rust and run 'cargo install --path .' from the source."
+    echo -e "${YELLOW}Failed to download the binary. Attempting to build from source...${NC}"
+    
+    if ! command -v cargo &> /dev/null; then
+        echo -e "${RED}Rust is not installed. Please install Rust from https://rustup.rs/${NC}"
+        exit 1
+    fi
+    
+    echo "Building Klein from source..."
+    if cargo install --path .; then
+        echo -e "${GREEN}Successfully built and installed Klein from source!${NC}"
+    else
+        echo -e "${RED}Failed to build Klein. Please check the error messages above.${NC}"
+        exit 1
+    fi
 fi
 
 prompt_configuration

@@ -92,9 +92,12 @@ if ($Reconfigure) {
 Write-Host "`n╭────────────┤ Installation ├────────────╮" -ForegroundColor $Cyan
 
 $exePath = "$AppDir\klein.exe"
+$downloadUrl = "https://github.com/Adarsh-codesOP/Klein/releases/download/stable/klein-windows-x86_64.exe"
+
 try {
     Write-Host "Downloading pre-compiled binary from GitHub Releases..." -ForegroundColor $Yellow
-    Invoke-WebRequest -Uri "https://github.com/Adarsh-codesOP/Klein/releases/download/stable/klein.exe" -OutFile "$exePath"
+    Write-Host "URL: $downloadUrl" -ForegroundColor $DarkGray
+    Invoke-WebRequest -Uri $downloadUrl -OutFile "$exePath" -ErrorAction Stop
     Write-Host "Successfully downloaded to $exePath" -ForegroundColor $Green
     
     # Add to User PATH if not present
@@ -107,7 +110,17 @@ try {
     }
 }
 catch {
-    Write-Host "Failed to download the executable. Please install Rust and run 'cargo install --path .' from the source code." -ForegroundColor Red
+    Write-Host "Failed to download the executable from GitHub Releases." -ForegroundColor Red
+    Write-Host "Error: $_" -ForegroundColor Red
+    Write-Host "`nFallback: Installing from source using Rust..." -ForegroundColor Yellow
+    
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        Write-Host "Rust is not installed. Please install Rust from https://rustup.rs/" -ForegroundColor Red
+        exit 1
+    }
+    
+    Write-Host "Building Klein from source...\n" -ForegroundColor Yellow
+    cargo install --path .
 }
 
 Prompt-Configuration

@@ -1,7 +1,11 @@
 [package]
 name = "klein"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+authors = ["Adarsh"]
+license = "Apache-2.0"
+repository = "https://github.com/Adarsh-codesOP/Klein"
+description = "A professional terminal-based text editor with IDE-like features"
 
 [dependencies]
 ratatui = "0.26"
