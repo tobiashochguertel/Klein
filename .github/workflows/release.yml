@@ -242,10 +242,12 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
+          $binarySource = "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          $binaryName = "${{ matrix.artifact_name }}"
           $archive = "klein-$env:VERSION-${{ matrix.target }}${{ matrix.archive_ext }}"
-          Compress-Archive `
-            -Path "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" `
-            -DestinationPath $archive
+          Copy-Item -Path $binarySource -Destination $binaryName -Force
+          Compress-Archive -Path $binaryName -DestinationPath $archive
+          Remove-Item -Path $binaryName -Force
           "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upload build artifact
@@ -319,8 +321,17 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${VERSION}" -m "Release ${VERSION} (${BUMP_TYPE} bump)"
-          git push origin "${VERSION}"
+
+          # Ensure we have up-to-date tags from the remote
+          git fetch --tags origin
+
+          # Skip tag creation if tag already exists (makes reruns idempotent)
+          if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+            echo "Tag ${VERSION} already exists. Skipping tag creation and push."
+          else
+            git tag -a "${VERSION}" -m "Release ${VERSION} (${BUMP_TYPE} bump)"
+            git push origin "${VERSION}"
+          fi
 
       # ── Create GitHub Release with all platform archives ──────────────────
       - name: Create GitHub Release
@@ -346,5 +357,5 @@ jobs:
           echo "" >> "${GITHUB_STEP_SUMMARY}"
           echo "### Install via mise" >> "${GITHUB_STEP_SUMMARY}"
           echo '```' >> "${GITHUB_STEP_SUMMARY}"
-          echo "mise use -g ubi:tobiashochguertel/Klein" >> "${GITHUB_STEP_SUMMARY}"
+          echo "mise use -g ubi:Adarsh-codesOP/Klein" >> "${GITHUB_STEP_SUMMARY}"
           echo '```' >> "${GITHUB_STEP_SUMMARY}"
