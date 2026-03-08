@@ -207,7 +207,7 @@ function Install-FromSource {
     }
     Write-Host "Building from source (this may take a few minutes)…" -ForegroundColor $Yellow
     try {
-        cargo install klein
+        cargo install --git https://github.com/$Repo
         return $true
     } catch {
         try {
