@@ -206,10 +206,13 @@ function Install-FromSource {
         return $false
     }
     Write-Host "Building from source (this may take a few minutes)…" -ForegroundColor $Yellow
+    # Install from the GitHub repository, NOT from crates.io.
+    # A crate named 'klein' exists on crates.io but is an unrelated project (PGA3D library).
     try {
-        cargo install klein
+        cargo install --git "https://github.com/$Repo" --root $AppDir
         return $true
     } catch {
+        # Fallback: if running from a local clone of the repo, build in-place
         try {
             cargo install --path .
             return $true
