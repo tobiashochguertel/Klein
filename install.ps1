@@ -205,18 +205,37 @@ function Install-FromSource {
         Write-Host "Rust is not installed. Install from https://rustup.rs/" -ForegroundColor $Red
         return $false
     }
+
     Write-Host "Building from source (this may take a few minutes)…" -ForegroundColor $Yellow
+
     # Install from the GitHub repository, NOT from crates.io.
-    # A crate named 'klein' exists on crates.io but is an unrelated project (PGA3D library).
+    # A crate named 'klein' exists on crates.io but is an unrelated project.
     try {
         cargo install --git "https://github.com/$Repo" --root $AppDir
+
+        # Cargo installs binaries into $AppDir\bin
+        $built = Join-Path $AppDir "bin\klein.exe"
+
+        if (Test-Path $built) {
+            Copy-Item $built $BinPath -Force
+        }
+
         return $true
-    } catch {
-        # Fallback: if running from a local clone of the repo, build in-place
+    }
+    catch {
+        # Fallback: if running from a local clone of the repo
         try {
-            cargo install --path .
+            cargo install --path . --root $AppDir
+
+            $built = Join-Path $AppDir "bin\klein.exe"
+
+            if (Test-Path $built) {
+                Copy-Item $built $BinPath -Force
+            }
+
             return $true
-        } catch {
+        }
+        catch {
             return $false
         }
     }
