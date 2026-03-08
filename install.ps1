@@ -217,10 +217,12 @@ function Install-FromSource {
     try {
         cargo install --git "https://github.com/$Repo" --root $AppDir
 
-        # Cargo installs binaries into $AppDir/bin
+        # Cargo installs binaries into $AppDir/bin.
+        # Only copy when source != destination (on Windows $BinDir IS $AppDir\bin,
+        # so src and dst are identical — copying to self throws and is unnecessary).
         $built = Join-Path (Join-Path $AppDir "bin") $BinName
-
-        if (Test-Path $built) {
+        if ((Test-Path $built) -and ($built -ne $BinPath)) {
+            New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
             Copy-Item $built $BinPath -Force
         }
 
@@ -231,8 +233,8 @@ function Install-FromSource {
             cargo install --path . --root $AppDir
 
             $built = Join-Path (Join-Path $AppDir "bin") $BinName
-
-            if (Test-Path $built) {
+            if ((Test-Path $built) -and ($built -ne $BinPath)) {
+                New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
                 Copy-Item $built $BinPath -Force
             }
 
