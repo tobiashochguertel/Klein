@@ -208,13 +208,11 @@ function Install-FromSource {
 
     Write-Host "Building from source (this may take a few minutes)…" -ForegroundColor $Yellow
 
-    # Install from the GitHub repository, NOT from crates.io.
-    # A crate named 'klein' exists on crates.io but is an unrelated project.
     try {
         cargo install --git "https://github.com/$Repo" --root $AppDir
 
-        # Cargo installs binaries into $AppDir\bin
-        $built = Join-Path $AppDir "bin\klein.exe"
+        # Cargo installs binaries into $AppDir/bin
+        $built = Join-Path (Join-Path $AppDir "bin") $BinName
 
         if (Test-Path $built) {
             Copy-Item $built $BinPath -Force
@@ -223,11 +221,10 @@ function Install-FromSource {
         return $true
     }
     catch {
-        # Fallback: if running from a local clone of the repo
         try {
             cargo install --path . --root $AppDir
 
-            $built = Join-Path $AppDir "bin\klein.exe"
+            $built = Join-Path (Join-Path $AppDir "bin") $BinName
 
             if (Test-Path $built) {
                 Copy-Item $built $BinPath -Force
@@ -240,7 +237,6 @@ function Install-FromSource {
         }
     }
 }
-
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 function Invoke-Configuration {
