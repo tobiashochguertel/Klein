@@ -225,7 +225,9 @@ install_from_source() {
     fi
     echo -e "${YELLOW}Building from source (this may take a few minutes)…${NC}"
     mkdir -p "${BIN_DIR}"
-    cargo install --root "${HOME}/.local" "${BIN_NAME}" 2>&1 \
+    # Install from the GitHub repository, NOT from crates.io.
+    # A crate named 'klein' exists on crates.io but is an unrelated project.
+    cargo install --git "https://github.com/${REPO}" --root "${HOME}/.local" 2>&1 \
         || cargo install --path . --root "${HOME}/.local" 2>&1
 }
 
