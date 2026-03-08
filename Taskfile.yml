@@ -1,0 +1,321 @@
+version: "3"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Klein — Local CI simulation + install-script test Taskfile
+#
+# Mirrors the steps in .github/workflows/ci.yml so every CI check can be
+# validated locally before pushing. Also provides Docker-based tasks to test
+# install.sh across different Linux distributions.
+#
+# Usage:
+#   task                     → show available tasks
+#   task ci:all              → run the full CI suite (fmt + build + clippy)
+#   task ci:fix              → auto-fix formatting and clippy issues then re-verify
+#   task test:install:ubuntu → test install.sh in an Ubuntu 22.04 container
+#   task test:install:debian → test install.sh in a Debian Bookworm container
+#   task test:install:alpine → test install.sh in an Alpine container
+#   task test:install:all    → run all install.sh Docker tests in parallel
+#
+# TEST_REPO is auto-detected (see vars section). Override explicitly if needed:
+#   task test:install:ubuntu TEST_REPO=owner/repo
+# ─────────────────────────────────────────────────────────────────────────────
+
+vars:
+  TARGET:
+    sh: rustc -vV 2>/dev/null | awk '/host:/{print $2}'
+  CARGO_FLAGS: ""
+  DEBUG: '{{.DEBUG | default "false"}}'
+  # TEST_REPO: auto-detected via the following priority chain:
+  #   1. CLI override:        task test:install:ubuntu TEST_REPO=owner/repo
+  #   2. $GITHUB_REPOSITORY:  set automatically by GitHub Actions on every run
+  #   3. git remote origin:   parsed from the clone's remote URL (works in forks)
+  #   4. Fallback:            tobiashochguertel/Klein (fork with published releases)
+  #
+  # The repo must have GitHub Releases using the new asset naming:
+  #   klein-<version>-<rust-triple>.(tar.gz|zip)
+  TEST_REPO:
+    sh: |
+      # ── 1. GitHub Actions CI ──────────────────────────────────────────────
+      if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+        printf '%s' "${GITHUB_REPOSITORY}"
+        exit 0
+      fi
+      # ── 2. Git remote of this clone ───────────────────────────────────────
+      _remote=$(git remote get-url origin 2>/dev/null || true)
+      if [ -n "${_remote}" ]; then
+        # Strip everything up to github.com/ or github.com:, then strip .git
+        # Works with both HTTPS and SSH remotes, and both BSD and GNU sed.
+        _parsed=$(printf '%s' "${_remote}" \
+          | sed 's|.*github\.com[:/]||' \
+          | sed 's|\.git$||')
+        # Accept only if result looks like exactly owner/repo (one slash)
+        case "${_parsed}" in
+          */*) _slashes=$(printf '%s' "${_parsed}" | tr -cd '/' | wc -c | tr -d ' ')
+               [ "${_slashes}" -eq 1 ] && { printf '%s' "${_parsed}"; exit 0; } ;;
+        esac
+      fi
+      # ── 3. Fallback ───────────────────────────────────────────────────────
+      printf '%s' "Adarsh-codesOP/Klein"
+
+tasks:
+  # ── Default ────────────────────────────────────────────────────────────────
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  # ── CI suite ───────────────────────────────────────────────────────────────
+  ci:all:
+    desc: Run the complete local CI suite (fmt-check → build → clippy)
+    summary: |
+      Mirrors .github/workflows/ci.yml end-to-end.
+
+      Runs in order:
+        1. cargo fmt --check
+        2. cargo build
+        3. cargo clippy -- -D warnings
+
+      All steps must pass for the suite to succeed.
+
+      Examples:
+        task ci:all
+        task ci:all DEBUG=true
+    cmds:
+      - task: ci:fmt-check
+      - task: ci:build
+      - task: ci:clippy
+
+  # ── Individual CI steps ────────────────────────────────────────────────────
+  ci:fmt-check:
+    desc: "CI step 1 — check source formatting (cargo fmt --check)"
+    summary: |
+      Equivalent to the 'Check formatting' step in ci.yml.
+      Fails if any file differs from rustfmt output.
+
+      Fix automatically with: task ci:fmt-fix
+    cmds:
+      - |
+        {{if eq .DEBUG "true"}}echo "▶ cargo fmt --check"{{end}}
+        cargo fmt --check
+
+  ci:build:
+    desc: "CI step 2 — compile the project (cargo build)"
+    summary: |
+      Equivalent to the 'Build' step in ci.yml.
+      Uses the host target (no cross-compilation locally).
+    vars:
+      CARGO_FLAGS: '{{.CARGO_FLAGS | default ""}}'
+    cmds:
+      - |
+        {{if eq .DEBUG "true"}}echo "▶ cargo build {{.CARGO_FLAGS}}"{{end}}
+        cargo build {{.CARGO_FLAGS}}
+
+  ci:clippy:
+    desc: "CI step 3 — lint with clippy, deny warnings (cargo clippy -- -D warnings)"
+    summary: |
+      Equivalent to the 'Clippy' step in ci.yml.
+      Treats every clippy warning as a hard error (-D warnings).
+
+      Fix automatically with: task ci:clippy-fix
+    cmds:
+      - |
+        {{if eq .DEBUG "true"}}echo "▶ cargo clippy -- -D warnings"{{end}}
+        cargo clippy -- -D warnings
+
+  ci:clippy-permissive:
+    desc: "Run clippy without -D warnings (shows warnings without failing)"
+    cmds:
+      - cargo clippy 2>&1
+
+  # ── Fix helpers ────────────────────────────────────────────────────────────
+  ci:fix:
+    desc: Auto-fix formatting and clippy issues, then verify
+    summary: |
+      Runs all auto-fixers in order:
+        1. cargo fmt        (auto-formats all source files)
+        2. cargo clippy --fix --allow-dirty  (applies machine-fixable clippy suggestions)
+        3. task ci:all      (verifies everything passes)
+    cmds:
+      - task: ci:fmt-fix
+      - task: ci:clippy-fix
+      - task: ci:all
+
+  ci:fmt-fix:
+    desc: Auto-format source with rustfmt (cargo fmt)
+    cmds:
+      - |
+        {{if eq .DEBUG "true"}}echo "▶ cargo fmt"{{end}}
+        cargo fmt
+      - echo "✓ Formatting applied"
+
+  ci:clippy-fix:
+    desc: Apply machine-fixable clippy suggestions (cargo clippy --fix)
+    cmds:
+      - |
+        {{if eq .DEBUG "true"}}echo "▶ cargo clippy --fix --allow-dirty"{{end}}
+        cargo clippy --fix --allow-dirty -- -D warnings 2>&1 || true
+      - echo "✓ Clippy auto-fixes applied (remaining issues need manual fixing)"
+
+  # ── Utility ────────────────────────────────────────────────────────────────
+  ci:status:
+    desc: Quick summary of which CI checks pass/fail (non-blocking)
+    cmds:
+      - |
+        echo "═══════════════════════════════════════"
+        echo "  Klein CI — local status check"
+        echo "═══════════════════════════════════════"
+
+        run_check() {
+          local label="$1"; shift
+          if "$@" >/dev/null 2>&1; then
+            echo "  ✅  $label"
+          else
+            echo "  ❌  $label"
+          fi
+        }
+
+        run_check "cargo fmt --check" cargo fmt --check
+        run_check "cargo build"       cargo build
+        run_check "cargo clippy -D warnings" cargo clippy -- -D warnings
+        echo "═══════════════════════════════════════"
+
+  build:release:
+    desc: Build an optimised release binary for the host platform
+    vars:
+      TARGET: '{{.TARGET}}'
+    cmds:
+      - cargo build --release
+      - echo "✓ Binary at target/release/klein"
+
+  # ── Docker install.sh tests ────────────────────────────────────────────────
+  # These tasks run install.sh inside disposable Docker containers to verify
+  # the download and installation logic across different Linux distributions.
+  #
+  # Requirements: Docker must be running.
+  # The TEST_REPO variable should point to a repo that has GitHub Releases with
+  # the new asset naming (klein-<version>-<triple>.tar.gz).
+
+  test:install:ubuntu:
+    desc: "Test install.sh in Ubuntu 22.04 (amd64)"
+    summary: |
+      Spins up an ubuntu:22.04 container, mounts the repo read-only, and
+      runs install.sh --yes (non-interactive). Verifies the klein binary
+      is present after installation.
+
+      Override the target repo with: TEST_REPO=owner/repo
+    cmds:
+      - |
+        echo "▶ Testing install.sh on Ubuntu 22.04 (repo: {{.TEST_REPO}})"
+        docker run --rm \
+          --volume "{{.ROOT_DIR}}:/klein:ro" \
+          --env REPO="{{.TEST_REPO}}" \
+          ubuntu:22.04 \
+          bash -c "
+            set -euo pipefail
+            apt-get update -qq >/dev/null
+            apt-get install -y --no-install-recommends curl ca-certificates git >/dev/null
+            cp -r /klein /tmp/klein-src
+            cd /tmp/klein-src
+            bash install.sh --yes
+            echo ''
+            BIN=\$(find \$HOME -name 'klein' -type f 2>/dev/null | head -1 || true)
+            if [ -z \"\$BIN\" ]; then
+              echo '✗ FAIL: klein binary not found after install'
+              exit 1
+            fi
+            echo \"✔ PASS: klein binary found at \$BIN\"
+          "
+
+  test:install:debian:
+    desc: "Test install.sh in Debian Bookworm (amd64)"
+    cmds:
+      - |
+        echo "▶ Testing install.sh on Debian Bookworm (repo: {{.TEST_REPO}})"
+        docker run --rm \
+          --volume "{{.ROOT_DIR}}:/klein:ro" \
+          --env REPO="{{.TEST_REPO}}" \
+          debian:bookworm-slim \
+          bash -c "
+            set -euo pipefail
+            apt-get update -qq >/dev/null
+            apt-get install -y --no-install-recommends curl ca-certificates git >/dev/null
+            cp -r /klein /tmp/klein-src
+            cd /tmp/klein-src
+            bash install.sh --yes
+            BIN=\$(find \$HOME -name 'klein' -type f 2>/dev/null | head -1 || true)
+            if [ -z \"\$BIN\" ]; then
+              echo '✗ FAIL: klein binary not found after install'
+              exit 1
+            fi
+            echo \"✔ PASS: klein binary found at \$BIN\"
+          "
+
+  test:install:alpine:
+    desc: "Test install.sh in Alpine Linux (amd64)"
+    cmds:
+      - |
+        echo "▶ Testing install.sh on Alpine (repo: {{.TEST_REPO}})"
+        docker run --rm \
+          --volume "{{.ROOT_DIR}}:/klein:ro" \
+          --env REPO="{{.TEST_REPO}}" \
+          alpine:3.19 \
+          sh -c "
+            set -eu
+            apk add --quiet bash curl ca-certificates git
+            cp -r /klein /tmp/klein-src
+            cd /tmp/klein-src
+            bash install.sh --yes
+            BIN=\$(find \$HOME -name 'klein' -type f 2>/dev/null | head -1 || true)
+            if [ -z \"\$BIN\" ]; then
+              echo '✗ FAIL: klein binary not found after install'
+              exit 1
+            fi
+            echo \"✔ PASS: klein binary found at \$BIN\"
+          "
+
+  test:install:all:
+    desc: "Run install.sh Docker tests on Ubuntu, Debian, and Alpine; and install.ps1 on PowerShell/Linux"
+    summary: |
+      Runs all Linux Docker tests (bash + PowerShell) sequentially.
+      Override the test repo with: TEST_REPO=owner/repo
+    cmds:
+      - task: test:install:ubuntu
+      - task: test:install:debian
+      - task: test:install:alpine
+      - task: test:install:pwsh
+      - echo "✔ All Docker install tests passed!"
+
+  test:install:pwsh:
+    desc: "Test install.ps1 in a PowerShell/Linux container (cross-platform logic)"
+    summary: |
+      Runs install.ps1 inside mcr.microsoft.com/powershell (Linux, amd64).
+      This verifies the script logic, API calls, and Linux download path.
+      True Windows validation requires a Windows runner (see test:install:windows-ci).
+
+      Requirements: Docker must be running. --platform linux/amd64 is used since
+      the PowerShell image is amd64-only (no arm64 variant).
+
+      Override the target repo with: TEST_REPO=owner/repo
+    cmds:
+      - |
+        echo "▶ Testing install.ps1 on PowerShell/Linux (repo: {{.TEST_REPO}})"
+        docker run --rm \
+          --platform linux/amd64 \
+          --volume "{{.ROOT_DIR}}:/klein:ro" \
+          --env REPO="{{.TEST_REPO}}" \
+          mcr.microsoft.com/powershell:latest \
+          pwsh -Command "
+            Set-StrictMode -Version Latest
+            \$ErrorActionPreference = 'Stop'
+            Copy-Item -Recurse /klein /tmp/klein-src
+            Set-Location /tmp/klein-src
+            & ./install.ps1 -Yes
+            \$p1 = \$HOME + '/.local/bin/klein'
+            \$candidates = @(\$p1, '/usr/local/bin/klein') |
+              Where-Object { \$_ -and (Test-Path \$_) }
+            if (-not \$candidates) {
+              Write-Host '✗ FAIL: klein binary not found after install' -ForegroundColor Red
+              exit 1
+            }
+            Write-Host ('✔ PASS: klein binary found at ' + \$candidates[0]) -ForegroundColor Green
+          "
