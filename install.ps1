@@ -5,6 +5,12 @@ param (
 
 $ErrorActionPreference = "Stop"
 
+# ── Application identity ─────────────────────────────────────────────────────
+# Single place to update if the project or binary is ever renamed.
+# Can also be overridden via environment variables (e.g. in CI).
+$AppName    = if ($env:APP_NAME)    { $env:APP_NAME    } else { "Klein" }
+$BinaryName = if ($env:BINARY_NAME) { $env:BINARY_NAME } else { "klein" }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Klein — cross-platform installer (PowerShell Core 7+)
 #
@@ -48,19 +54,19 @@ $RepoName  = $Repo.Split("/")[1]
 
 # ── Paths (platform-aware) ───────────────────────────────────────────────────
 if ($OnWindows) {
-    $AppDir     = "$env:LOCALAPPDATA\Klein"
-    $BinDir     = $AppDir
+    $AppDir     = "$env:LOCALAPPDATA\$AppName"
+    $BinDir     = "$AppDir\bin"   # cargo install --root uses <root>/bin/ — keep consistent
     $ConfigPath = "$AppDir\config.toml"
-    $BinName    = "klein.exe"
+    $BinName    = "$BinaryName.exe"
     $TmpRoot    = $env:TEMP
     $HomeDir    = $env:USERPROFILE
 } else {
     $HomeDir    = $env:HOME
-    $AppDir     = "$HomeDir/.local/share/klein"
+    $AppDir     = "$HomeDir/.local/share/$BinaryName"
     $BinDir     = "$HomeDir/.local/bin"
-    $ConfigDir  = if ($OnMacOS) { "$HomeDir/Library/Application Support/klein" } else { "$HomeDir/.config/klein" }
+    $ConfigDir  = if ($OnMacOS) { "$HomeDir/Library/Application Support/$BinaryName" } else { "$HomeDir/.config/$BinaryName" }
     $ConfigPath = "$ConfigDir/config.toml"
-    $BinName    = "klein"
+    $BinName    = $BinaryName
     $TmpRoot    = if ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
 }
 $BinPath = Join-Path $BinDir $BinName
@@ -211,10 +217,12 @@ function Install-FromSource {
     try {
         cargo install --git "https://github.com/$Repo" --root $AppDir
 
-        # Cargo installs binaries into $AppDir/bin
+        # Cargo installs binaries into $AppDir/bin.
+        # Only copy when source != destination (on Windows $BinDir IS $AppDir\bin,
+        # so src and dst are identical — copying to self throws and is unnecessary).
         $built = Join-Path (Join-Path $AppDir "bin") $BinName
-
-        if (Test-Path $built) {
+        if ((Test-Path $built) -and ($built -ne $BinPath)) {
+            New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
             Copy-Item $built $BinPath -Force
         }
 
@@ -225,8 +233,8 @@ function Install-FromSource {
             cargo install --path . --root $AppDir
 
             $built = Join-Path (Join-Path $AppDir "bin") $BinName
-
-            if (Test-Path $built) {
+            if ((Test-Path $built) -and ($built -ne $BinPath)) {
+                New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
                 Copy-Item $built $BinPath -Force
             }
 
