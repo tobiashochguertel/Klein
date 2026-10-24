@@ -205,10 +205,8 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> io::Result<()> {
                 app.editor_mut().clamp_cursor_x();
             }
         }
-        MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-            if app.terminal_sel.is_some() {
-                copy_terminal_selection(app);
-            }
+        MouseEventKind::Up(crossterm::event::MouseButton::Left) if app.terminal_sel.is_some() => {
+            copy_terminal_selection(app);
         }
         _ => {}
     }
@@ -539,17 +537,16 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> io::Result<()> {
                     app.save_as_state.is_edited = true;
                 }
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c)
                 if app.save_as_state.focus_filename
                     && !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT)
-                {
-                    if !app.save_as_state.is_edited {
-                        app.save_as_state.filename.clear();
-                        app.save_as_state.is_edited = true;
-                    }
-                    app.save_as_state.filename.push(c);
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if !app.save_as_state.is_edited {
+                    app.save_as_state.filename.clear();
+                    app.save_as_state.is_edited = true;
                 }
+                app.save_as_state.filename.push(c);
             }
             _ => {}
         }
