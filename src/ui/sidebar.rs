@@ -1,5 +1,4 @@
 use crate::app::{App, Panel};
-use crate::config;
 use ratatui::{
     layout::Rect,
     widgets::{Block, Borders, Paragraph},
@@ -7,8 +6,19 @@ use ratatui::{
 };
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    f.render_widget(ratatui::widgets::Clear, area);
     let mut list_items = Vec::new();
-    for (i, (path, depth, is_dir)) in app.sidebar.flat_list.iter().enumerate() {
+    let height = area.height.saturating_sub(2) as usize;
+    let offset = app.sidebar.offset;
+    let visible_slice = app
+        .sidebar
+        .flat_list
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height);
+
+    for (i, (path, depth, is_dir)) in visible_slice {
         let prefix = "  ".repeat(*depth);
         let icon = if *is_dir { "📁 " } else { "📄 " };
         let name = path
@@ -19,13 +29,18 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         if i == app.sidebar.selected_index {
             if matches!(app.active_panel, Panel::Sidebar) {
                 style = style
-                    .bg(ratatui::style::Color::Green)
-                    .fg(ratatui::style::Color::Black);
+                    .bg(app.theme.sidebar.selected)
+                    .fg(app.theme.sidebar.text);
             } else {
                 style = style
-                    .bg(ratatui::style::Color::DarkGray)
-                    .fg(ratatui::style::Color::White);
+                    .bg(app.theme.sidebar.background)
+                    .fg(app.theme.sidebar.text)
+                    .add_modifier(ratatui::style::Modifier::DIM);
             }
+        } else {
+            style = style
+                .bg(app.theme.sidebar.background)
+                .fg(app.theme.sidebar.text);
         }
         list_items.push(ratatui::text::Line::from(vec![
             ratatui::text::Span::styled(prefix, style),
@@ -38,14 +53,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .title(" File Explorer ")
         .borders(Borders::ALL)
         .border_style(if matches!(app.active_panel, Panel::Sidebar) {
-            ratatui::style::Style::default().fg(config::colors::EXPLORER_FOCUS)
+            ratatui::style::Style::default().fg(app.theme.sidebar.selected)
         } else {
-            ratatui::style::Style::default()
-        });
+            ratatui::style::Style::default().fg(app.theme.sidebar.text)
+        })
+        .style(ratatui::style::Style::default().bg(app.theme.sidebar.background));
 
     app.sidebar.last_height.set(area.height as usize);
-    let sidebar_widget = Paragraph::new(list_items)
-        .block(sidebar_block)
-        .scroll((app.sidebar.offset as u16, 0));
+    let sidebar_widget = Paragraph::new(list_items).block(sidebar_block);
     f.render_widget(sidebar_widget, area);
 }
