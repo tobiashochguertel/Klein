@@ -1,14 +1,24 @@
 use crate::app::{App, Panel};
-use crate::config;
+use crate::lsp::types::DiagnosticSeverity;
 use ratatui::{
     layout::Rect,
+    style::{Color, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    f.render_widget(ratatui::widgets::Clear, area);
     let is_preview = matches!(app.active_panel, Panel::Sidebar) && app.preview.is_some();
     let editor = app.active_editor();
+
+    // Use a consistent background to prevent ghosting
+    let bg_color = if is_preview {
+        ratatui::style::Color::Rgb(15, 15, 25) // Very dark blue for preview depth
+    } else {
+        app.theme.editor.background
+    };
 
     let title = if is_preview {
         format!(
@@ -23,7 +33,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     } else {
         format!(
             " {} - {} ",
-            config::APP_TITLE,
+            crate::config::APP_TITLE,
             editor
                 .path
                 .as_ref()
@@ -34,22 +44,31 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let border_color = if is_preview {
-        ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)
+        ratatui::style::Color::DarkGray
     } else if matches!(app.active_panel, Panel::Editor) {
-        ratatui::style::Style::default().fg(config::colors::EDITOR_FOCUS)
+        app.theme.editor.cursor // Use cursor color for focus
     } else {
-        ratatui::style::Style::default()
+        app.theme.editor.text // Use plain text color for non-focus
     };
 
     let editor_block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(border_color);
+        .border_style(ratatui::style::Style::default().fg(border_color))
+        .style(ratatui::style::Style::default().bg(bg_color));
 
     let inner_rect = editor_block.inner(area);
     f.render_widget(editor_block, area);
 
-    let gutter_width = editor.get_gutter_width();
+    // Diagnostics for this file
+    let empty_vec = Vec::new();
+    let file_diagnostics = editor
+        .path
+        .as_ref()
+        .and_then(|p| app.lsp_state.diagnostics.get(p))
+        .unwrap_or(&empty_vec);
+
+    let gutter_width = editor.get_gutter_width() + 2; // icon + space + padding
 
     let layout = ratatui::layout::Layout::default()
         .direction(ratatui::layout::Direction::Horizontal)
@@ -70,21 +89,64 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     // Render Gutter (Line Numbers)
     let start_line = editor.scroll_y;
-    let end_line = (start_line + content_area.height as usize).min(editor.buffer.len_lines());
-    let mut line_numbers = String::new();
+    let num_lines = editor.buffer.len_lines();
+    let mut gutter_lines = Vec::new();
+
+    let end_line = (start_line + content_area.height as usize).min(num_lines);
     for i in start_line..end_line {
-        line_numbers.push_str(&format!("{:>width$} \n", i + 1, width = gutter_width - 1));
+        // Find highest severity diagnostic for this line
+        let line_diag = file_diagnostics
+            .iter()
+            .filter(|d| d.line == i)
+            .max_by_key(|d| d.severity.clone());
+
+        let icon_span = if let Some(d) = line_diag {
+            let color = match d.severity {
+                DiagnosticSeverity::Error => Color::Red,
+                DiagnosticSeverity::Warning => Color::Yellow,
+                DiagnosticSeverity::Info => Color::Blue,
+                DiagnosticSeverity::Hint => Color::DarkGray,
+            };
+            Span::styled(
+                format!("{} ", d.severity.icon()),
+                Style::default().fg(color),
+            )
+        } else {
+            Span::from("  ")
+        };
+
+        let line_num_span = Span::styled(
+            format!("{:>width$} ", i + 1, width = gutter_width - 3),
+            Style::default()
+                .fg(app.theme.editor.text)
+                .add_modifier(ratatui::style::Modifier::DIM),
+        );
+
+        gutter_lines.push(Line::from(vec![icon_span, line_num_span]));
     }
 
-    let gutter_widget = Paragraph::new(line_numbers)
-        .style(ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray));
+    // Pad gutter to full height
+    while gutter_lines.len() < gutter_area.height as usize {
+        gutter_lines.push(ratatui::text::Line::from(" ".repeat(gutter_width)));
+    }
+
+    let gutter_widget = Paragraph::new(gutter_lines).style(
+        ratatui::style::Style::default()
+            .fg(app.theme.editor.text)
+            .bg(bg_color),
+    );
     f.render_widget(gutter_widget, gutter_area);
 
     // Render Editor Content
-    let highlighted_lines =
-        editor.get_highlighted_lines(content_area.width as usize, content_area.height as usize);
+    let highlighted_lines = editor.get_highlighted_lines(
+        content_area.width as usize,
+        content_area.height as usize,
+        app.theme.editor.selection,
+        app.theme.editor.background,
+    );
 
-    let editor_widget = Paragraph::new(highlighted_lines);
+    let editor_widget =
+        Paragraph::new(highlighted_lines).style(ratatui::style::Style::default().bg(bg_color));
     f.render_widget(editor_widget, content_area);
 
     // Show cursor — only for the real editor, not preview
@@ -94,7 +156,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             let cursor_screen_y = real_editor.cursor_y - real_editor.scroll_y;
             if cursor_screen_y < content_area.height as usize {
                 f.set_cursor(
-                    content_area.x + real_editor.cursor_x as u16,
+                    content_area.x + real_editor.get_cursor_screen_column() as u16,
                     content_area.y + cursor_screen_y as u16,
                 );
             }

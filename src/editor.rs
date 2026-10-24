@@ -1,10 +1,19 @@
 use anyhow::Result;
+use ratatui::style::Color;
 use ropey::Rope;
 use std::fs;
 use std::path::PathBuf;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
+
+#[derive(Clone)]
+pub struct UndoState {
+    pub buffer: Rope,
+    pub cursor_x: usize,
+    pub cursor_y: usize,
+    pub selection_start: Option<(usize, usize)>,
+}
 
 pub struct Editor {
     pub buffer: Rope,
@@ -14,9 +23,21 @@ pub struct Editor {
     pub scroll_y: usize,
     pub syntax_set: SyntaxSet,
     pub theme_set: ThemeSet,
-    pub clipboard: Option<arboard::Clipboard>,
     pub selection_start: Option<(usize, usize)>,
     pub is_dirty: bool,
+    pub undo_stack: Vec<UndoState>,
+    pub tree: Option<tree_sitter::Tree>,
+    pub ts_lang: Option<tree_sitter::Language>,
+    pub expansion_stack: Vec<((usize, usize), (usize, usize))>,
+    /// Track whether the file originally used CRLF line endings,
+    /// so we can restore them on save.
+    pub uses_crlf: bool,
+}
+
+impl Default for Editor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Editor {
@@ -29,44 +50,380 @@ impl Editor {
             scroll_y: 0,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
-            clipboard: arboard::Clipboard::new().ok(),
             selection_start: None,
             is_dirty: false,
+            undo_stack: Vec::new(),
+            tree: None,
+            ts_lang: None,
+            expansion_stack: Vec::new(),
+            uses_crlf: false,
         }
     }
 
-    pub fn open(&mut self, path: PathBuf) -> Result<()> {
+    pub fn save_undo_state(&mut self) {
+        self.undo_stack.push(UndoState {
+            buffer: self.buffer.clone(),
+            cursor_x: self.cursor_x,
+            cursor_y: self.cursor_y,
+            selection_start: self.selection_start,
+        });
+        if self.undo_stack.len() > 200 {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    pub fn undo(&mut self) {
+        if let Some(state) = self.undo_stack.pop() {
+            self.buffer = state.buffer;
+            self.cursor_x = state.cursor_x;
+            self.cursor_y = state.cursor_y;
+            self.selection_start = state.selection_start;
+            self.is_dirty = true;
+            self.ts_reparse();
+        }
+    }
+
+    pub fn reparse(&mut self, ts_manager: &crate::treesitter::TSManager) {
+        if let Some(path) = &self.path {
+            if let Some(mut parser) = ts_manager.create_parser_for_file(path) {
+                self.ts_lang = parser.language();
+                let content = self.buffer.to_string();
+                self.tree = parser.parse(content, self.tree.as_ref());
+            }
+        }
+    }
+
+    pub fn ts_reparse(&mut self) {
+        if let Some(lang) = self.ts_lang {
+            let mut parser = tree_sitter::Parser::new();
+            if parser.set_language(lang).is_ok() {
+                let content = self.buffer.to_string();
+                self.tree = parser.parse(content, self.tree.as_ref());
+            }
+        }
+    }
+
+    pub fn handle_edit(&mut self, edit: tree_sitter::InputEdit) {
+        if let Some(tree) = &mut self.tree {
+            tree.edit(&edit);
+        }
+    }
+
+    fn get_ts_point(&self, char_idx: usize) -> tree_sitter::Point {
+        let line = self.buffer.char_to_line(char_idx);
+        let line_start = self.buffer.line_to_char(line);
+        let col = char_idx - line_start;
+        let line_slice = self.buffer.line(line);
+        let col_bytes = line_slice.slice(0..col).len_bytes();
+        tree_sitter::Point::new(line, col_bytes)
+    }
+
+    fn buffer_insert(&mut self, char_idx: usize, text: &str) {
+        let start_byte = self.buffer.char_to_byte(char_idx);
+        let start_point = self.get_ts_point(char_idx);
+
+        self.buffer.insert(char_idx, text);
+
+        let new_end_byte = start_byte + text.len();
+        let new_end_point = self.get_ts_point(char_idx + text.chars().count());
+
+        self.handle_edit(tree_sitter::InputEdit {
+            start_byte,
+            old_end_byte: start_byte,
+            new_end_byte,
+            start_position: start_point,
+            old_end_position: start_point,
+            new_end_position: new_end_point,
+        });
+    }
+
+    fn buffer_remove(&mut self, range: std::ops::Range<usize>) {
+        let start_byte = self.buffer.char_to_byte(range.start);
+        let end_byte = self.buffer.char_to_byte(range.end);
+        let start_point = self.get_ts_point(range.start);
+        let end_point = self.get_ts_point(range.end);
+
+        self.buffer.remove(range);
+
+        self.handle_edit(tree_sitter::InputEdit {
+            start_byte,
+            old_end_byte: end_byte,
+            new_end_byte: start_byte,
+            start_position: start_point,
+            old_end_position: end_point,
+            new_end_position: start_point,
+        });
+    }
+
+    fn ts_point_to_char_col(&self, point: tree_sitter::Point) -> (usize, usize) {
+        let line = point.row;
+        if line >= self.buffer.len_lines() {
+            return (self.buffer.len_lines().saturating_sub(1), 0);
+        }
+        let line_slice = self.buffer.line(line);
+        let char_col = line_slice.byte_to_char(point.column);
+        (line, char_col)
+    }
+
+    pub fn expand_selection(&mut self) {
+        if let Some(tree) = &self.tree {
+            let char_idx = self.buffer.line_to_char(self.cursor_y) + self.cursor_x;
+
+            // Current selection range in bytes
+            let (start_byte, end_byte) = if let Some((sy, sx)) = self.selection_start {
+                let (sy, sx, ey, ex) = if (sy, sx) < (self.cursor_y, self.cursor_x) {
+                    (sy, sx, self.cursor_y, self.cursor_x)
+                } else {
+                    (self.cursor_y, self.cursor_x, sy, sx)
+                };
+                let sb =
+                    self.buffer.line_to_byte(sy) + self.buffer.line(sy).slice(0..sx).len_bytes();
+                let eb =
+                    self.buffer.line_to_byte(ey) + self.buffer.line(ey).slice(0..ex).len_bytes();
+                (sb, eb)
+            } else {
+                let sb = self.buffer.char_to_byte(char_idx);
+                (sb, sb)
+            };
+
+            if let Some(node) = tree
+                .root_node()
+                .descendant_for_byte_range(start_byte, end_byte)
+            {
+                let mut target_node = node;
+
+                // If the node exactly matches current selection, pick its parent
+                if target_node.start_byte() == start_byte && target_node.end_byte() == end_byte {
+                    if let Some(parent) = target_node.parent() {
+                        target_node = parent;
+                    }
+                }
+
+                // Save current state
+                self.expansion_stack.push((
+                    self.selection_start
+                        .unwrap_or((self.cursor_y, self.cursor_x)),
+                    (self.cursor_y, self.cursor_x),
+                ));
+
+                // Apply new selection
+                let (sy, sx) = self.ts_point_to_char_col(target_node.start_position());
+                let (ey, ex) = self.ts_point_to_char_col(target_node.end_position());
+
+                self.selection_start = Some((sy, sx));
+                self.cursor_y = ey;
+                self.cursor_x = ex;
+            }
+        }
+    }
+
+    pub fn shrink_selection(&mut self) {
+        if let Some((start, cursor)) = self.expansion_stack.pop() {
+            self.selection_start = if start == cursor { None } else { Some(start) };
+            self.cursor_y = cursor.0;
+            self.cursor_x = cursor.1;
+        }
+    }
+
+    pub fn swap_nodes(&mut self, right: bool) {
+        let ranges = if let Some(tree) = &self.tree {
+            let char_idx = self.buffer.line_to_char(self.cursor_y) + self.cursor_x;
+            let byte_idx = self.buffer.char_to_byte(char_idx);
+
+            if let Some(node) = tree
+                .root_node()
+                .descendant_for_byte_range(byte_idx, byte_idx)
+            {
+                let mut target_node = node;
+                let mut result = None;
+                while let Some(parent) = target_node.parent() {
+                    let mut cursor = parent.walk();
+                    let mut siblings = Vec::new();
+                    if cursor.goto_first_child() {
+                        loop {
+                            siblings.push(cursor.node());
+                            if !cursor.goto_next_sibling() {
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(pos) = siblings.iter().position(|n| n.id() == target_node.id()) {
+                        let sibling_idx = if right {
+                            pos + 1
+                        } else {
+                            pos.saturating_sub(1)
+                        };
+
+                        if sibling_idx < siblings.len() && sibling_idx != pos {
+                            result = Some((
+                                target_node.byte_range(),
+                                siblings[sibling_idx].byte_range(),
+                            ));
+                            break;
+                        }
+                    }
+                    target_node = parent;
+                }
+                result
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some((r1, r2)) = ranges {
+            self.swap_byte_ranges(r1, r2);
+        }
+    }
+
+    fn swap_byte_ranges(&mut self, r1: std::ops::Range<usize>, r2: std::ops::Range<usize>) {
+        let (first_r, second_r) = if r1.start < r2.start {
+            (r1, r2)
+        } else {
+            (r2, r1)
+        };
+
+        let first_text = self
+            .buffer
+            .slice(self.buffer.byte_to_char(first_r.start)..self.buffer.byte_to_char(first_r.end))
+            .to_string();
+        let second_text = self
+            .buffer
+            .slice(self.buffer.byte_to_char(second_r.start)..self.buffer.byte_to_char(second_r.end))
+            .to_string();
+
+        let first_char_range =
+            self.buffer.byte_to_char(first_r.start)..self.buffer.byte_to_char(first_r.end);
+        let second_char_range =
+            self.buffer.byte_to_char(second_r.start)..self.buffer.byte_to_char(second_r.end);
+
+        // Replace second first to keep first's indices valid
+        self.buffer_remove(second_char_range.clone());
+        self.buffer_insert(second_char_range.start, &first_text);
+
+        self.buffer_remove(first_char_range.clone());
+        self.buffer_insert(first_char_range.start, &second_text);
+    }
+
+    pub fn move_block(&mut self, down: bool) {
+        let ranges = if let Some(tree) = &self.tree {
+            let char_idx = self.buffer.line_to_char(self.cursor_y) + self.cursor_x;
+            let byte_idx = self.buffer.char_to_byte(char_idx);
+
+            if let Some(node) = tree
+                .root_node()
+                .descendant_for_byte_range(byte_idx, byte_idx)
+            {
+                let mut target_node = node;
+                let mut result = None;
+                while let Some(parent) = target_node.parent() {
+                    let mut cursor = parent.walk();
+                    let mut siblings = Vec::new();
+                    if cursor.goto_first_child() {
+                        loop {
+                            siblings.push(cursor.node());
+                            if !cursor.goto_next_sibling() {
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(pos) = siblings.iter().position(|n| n.id() == target_node.id()) {
+                        let sibling_idx = if down { pos + 1 } else { pos.saturating_sub(1) };
+
+                        if sibling_idx < siblings.len() && sibling_idx != pos {
+                            result = Some((
+                                target_node.byte_range(),
+                                siblings[sibling_idx].byte_range(),
+                            ));
+                            break;
+                        }
+                    }
+                    target_node = parent;
+                }
+                result
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some((r1, r2)) = ranges {
+            self.swap_byte_ranges(r1.clone(), r2.clone());
+            // Move cursor to stay with the block (simplified)
+            let new_char_idx = self.buffer.byte_to_char(if r1.start < r2.start {
+                r2.start
+            } else {
+                r1.start
+            });
+            self.cursor_y = self.buffer.char_to_line(new_char_idx);
+            self.cursor_x = new_char_idx - self.buffer.line_to_char(self.cursor_y);
+        }
+    }
+
+    pub fn open(&mut self, path: PathBuf, ts_manager: &crate::treesitter::TSManager) -> Result<()> {
         let content = fs::read_to_string(&path)?;
-        self.buffer = Rope::from_str(&content);
+
+        // Detect original line endings and normalize to LF.
+        // This is critical: tree-sitter byte offsets can drift from ropey's
+        // if the buffer contains \r\n, because they count bytes differently
+        // for line-to-char and char-to-byte conversions.
+        self.uses_crlf = content.contains("\r\n");
+        let normalized = if self.uses_crlf {
+            content.replace("\r\n", "\n")
+        } else {
+            content
+        };
+
+        self.buffer = Rope::from_str(&normalized);
         self.path = Some(path);
         self.cursor_x = 0;
         self.cursor_y = 0;
         self.scroll_y = 0;
         self.is_dirty = false;
         self.selection_start = None;
+        self.undo_stack.clear();
+
+        // Initial parse
+        self.reparse(ts_manager);
+
         Ok(())
     }
 
     pub fn save(&mut self) -> Result<()> {
         if let Some(path) = &self.path {
-            fs::write(path, self.buffer.to_string())?;
+            let mut content = self.buffer.to_string();
+            // Restore original CRLF line endings on save if the file had them
+            if self.uses_crlf {
+                content = content.replace('\n', "\r\n");
+            }
+            fs::write(path, content)?;
             self.is_dirty = false;
         }
         Ok(())
     }
 
     pub fn insert_char(&mut self, c: char) {
+        self.save_undo_state();
         let line_idx = self.buffer.line_to_char(self.cursor_y);
         let char_idx = line_idx + self.cursor_x;
-        self.buffer.insert_char(char_idx, c);
+        let mut s = String::new();
+        s.push(c);
+        self.buffer_insert(char_idx, &s);
         self.cursor_x += 1;
         self.is_dirty = true;
         self.selection_start = None;
+        self.ts_reparse();
     }
 
     pub fn delete_char(&mut self) {
+        self.save_undo_state();
         if self.selection_start.is_some() {
-            self.delete_selection();
+            self.delete_selection_internal();
+            self.ts_reparse();
             return;
         }
 
@@ -75,20 +432,55 @@ impl Editor {
 
         if char_idx > 0 {
             if self.cursor_x > 0 {
-                self.buffer.remove(char_idx - 1..char_idx);
+                self.buffer_remove(char_idx - 1..char_idx);
                 self.cursor_x -= 1;
             } else if self.cursor_y > 0 {
                 // Join lines
                 let prev_line_len = self.buffer.line(self.cursor_y - 1).len_chars();
-                self.buffer.remove(char_idx - 1..char_idx); // Remove newline
+                self.buffer_remove(char_idx - 1..char_idx); // Remove newline
                 self.cursor_y -= 1;
                 self.cursor_x = prev_line_len.saturating_sub(1);
             }
             self.is_dirty = true;
+            self.ts_reparse();
         }
     }
 
+    pub fn delete_forward_char(&mut self) {
+        self.save_undo_state();
+        if self.selection_start.is_some() {
+            self.delete_selection_internal();
+            self.ts_reparse();
+            return;
+        }
+
+        let line_idx = self.buffer.line_to_char(self.cursor_y);
+        let char_idx = line_idx + self.cursor_x;
+
+        if char_idx < self.buffer.len_chars() {
+            let mut end_idx = char_idx + 1;
+            // Handle CRLF windows newlines gracefully by deleting both parts
+            if self.buffer.char(char_idx) == '\r'
+                && end_idx < self.buffer.len_chars()
+                && self.buffer.char(end_idx) == '\n'
+            {
+                end_idx += 1;
+            }
+            self.buffer_remove(char_idx..end_idx);
+            self.is_dirty = true;
+            self.ts_reparse();
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn delete_selection(&mut self) {
+        if self.selection_start.is_some() {
+            self.save_undo_state();
+            self.delete_selection_internal();
+        }
+    }
+
+    fn delete_selection_internal(&mut self) {
         if let Some((start_y, start_x)) = self.selection_start {
             let (sy, sx, ey, ex) = if (start_y, start_x) < (self.cursor_y, self.cursor_x) {
                 (start_y, start_x, self.cursor_y, self.cursor_x)
@@ -100,13 +492,51 @@ impl Editor {
             let end_char = self.buffer.line_to_char(ey) + ex;
 
             if start_char < end_char {
-                self.buffer.remove(start_char..end_char);
+                self.buffer_remove(start_char..end_char);
                 self.cursor_y = sy;
                 self.cursor_x = sx;
+                self.selection_start = None;
                 self.is_dirty = true;
+
+                // Ensure cursor is within new buffer bounds
+                let num_lines = self.buffer.len_lines();
+                if self.cursor_y >= num_lines {
+                    self.cursor_y = num_lines.saturating_sub(1);
+                }
+                self.clamp_cursor_x();
+
+                // Reset scroll if we deleted everything or large chunks
+                if self.cursor_y < self.scroll_y {
+                    self.scroll_y = self.cursor_y;
+                }
+            } else {
+                self.selection_start = None;
             }
-            self.selection_start = None;
         }
+    }
+
+    pub fn replace_range(&mut self, mut start_char: usize, mut end_char: usize, text: &str) {
+        let max_len = self.buffer.len_chars();
+        start_char = start_char.min(max_len);
+        end_char = end_char.min(max_len);
+
+        if start_char > end_char {
+            std::mem::swap(&mut start_char, &mut end_char);
+        }
+
+        self.save_undo_state();
+        if start_char < end_char {
+            self.buffer_remove(start_char..end_char);
+        }
+        self.buffer_insert(start_char, text);
+
+        // Update cursor to end of inserted text
+        let new_char_idx = start_char + text.chars().count();
+        self.cursor_y = self.buffer.char_to_line(new_char_idx);
+        self.cursor_x = new_char_idx - self.buffer.line_to_char(self.cursor_y);
+
+        self.is_dirty = true;
+        self.ts_reparse();
     }
 
     pub fn get_gutter_width(&self) -> usize {
@@ -118,7 +548,13 @@ impl Editor {
         &self,
         _width: usize,
         height: usize,
+        selection_bg: Color,
+        selection_fg: Color,
     ) -> Vec<ratatui::text::Line<'_>> {
+        if let Some(tree) = &self.tree {
+            return self.get_ts_highlighted_lines(tree, _width, height, selection_bg, selection_fg);
+        }
+
         let syntax = if let Some(path) = &self.path {
             self.syntax_set
                 .find_syntax_for_file(path)
@@ -141,56 +577,91 @@ impl Editor {
                 .unwrap_or_default();
 
             let mut current_char_in_line = 0;
-            let spans: Vec<ratatui::text::Span> = highlights
-                .into_iter()
-                .map(|(style, text)| {
-                    let mut span_style =
-                        ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(
-                            style.foreground.r,
-                            style.foreground.g,
-                            style.foreground.b,
-                        ));
+            let mut spans: Vec<ratatui::text::Span> = Vec::new();
 
-                    // Check for selection
-                    if let Some((start_y, start_x)) = self.selection_start {
-                        let (sy, sx, ey, ex) =
-                            if (start_y, start_x) < (self.cursor_y, self.cursor_x) {
-                                (start_y, start_x, self.cursor_y, self.cursor_x)
-                            } else {
-                                (self.cursor_y, self.cursor_x, start_y, start_x)
-                            };
+            for (style, text) in highlights {
+                // Strip line terminators to prevent Ratatui from wrapping/double-spacing
+                let text = text.trim_end_matches(['\n', '\r']);
+                let text = &Self::expand_tabs(text);
+                if text.is_empty() {
+                    continue;
+                }
 
-                        let text_len = text.chars().count();
-                        let span_range_start = current_char_in_line;
-                        let span_range_end = current_char_in_line + text_len;
+                let span_style = ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(
+                    style.foreground.r,
+                    style.foreground.g,
+                    style.foreground.b,
+                ));
 
-                        let line_idx = i;
+                if let Some((start_y, start_x)) = self.selection_start {
+                    let (sy, sx, ey, ex) = if (start_y, start_x) < (self.cursor_y, self.cursor_x) {
+                        (start_y, start_x, self.cursor_y, self.cursor_x)
+                    } else {
+                        (self.cursor_y, self.cursor_x, start_y, start_x)
+                    };
 
-                        let is_selected = if line_idx > sy && line_idx < ey {
+                    let line_idx = i;
+                    let mut current_segment = String::new();
+                    let mut current_is_selected = false;
+
+                    for (idx, c) in text.chars().enumerate() {
+                        let char_pos = current_char_in_line + idx;
+                        let is_char_selected = if line_idx > sy && line_idx < ey {
                             true
                         } else if line_idx == sy && line_idx == ey {
-                            span_range_start < ex && span_range_end > sx
+                            char_pos >= sx && char_pos < ex
                         } else if line_idx == sy {
-                            span_range_end > sx
+                            char_pos >= sx
                         } else if line_idx == ey {
-                            span_range_start < ex
+                            char_pos < ex
                         } else {
                             false
                         };
 
-                        if is_selected {
-                            span_style = span_style
-                                .bg(ratatui::style::Color::Yellow)
-                                .fg(ratatui::style::Color::Black);
+                        if idx == 0 {
+                            current_is_selected = is_char_selected;
+                        } else if is_char_selected != current_is_selected {
+                            let mut s_style = span_style;
+                            if current_is_selected {
+                                s_style = s_style.bg(selection_bg).fg(selection_fg);
+                            }
+                            spans.push(ratatui::text::Span::styled(
+                                current_segment.clone(),
+                                s_style,
+                            ));
+                            current_segment.clear();
+                            current_is_selected = is_char_selected;
                         }
-                        current_char_in_line += text_len;
+                        current_segment.push(c);
                     }
 
-                    ratatui::text::Span::styled(text.to_string(), span_style)
-                })
-                .collect();
+                    if !current_segment.is_empty() {
+                        let mut s_style = span_style;
+                        if current_is_selected {
+                            s_style = s_style.bg(selection_bg).fg(selection_fg);
+                        }
+                        spans.push(ratatui::text::Span::styled(current_segment, s_style));
+                    }
+                    current_char_in_line += text.chars().count();
+                } else {
+                    current_char_in_line += text.chars().count();
+                    spans.push(ratatui::text::Span::styled(text.to_string(), span_style));
+                }
+            }
 
+            if current_char_in_line < _width {
+                spans.push(ratatui::text::Span::raw(
+                    " ".repeat(_width - current_char_in_line),
+                ));
+            }
             lines.push(ratatui::text::Line::from(spans));
+        }
+
+        // Fill remaining height with empty lines to ensure the background is fully drawn
+        // and any debris from previous frames is overwritten.
+        let empty_line = " ".repeat(_width);
+        while lines.len() < height {
+            lines.push(ratatui::text::Line::from(empty_line.clone()));
         }
 
         lines
@@ -245,10 +716,13 @@ impl Editor {
     }
 
     pub fn insert_tab(&mut self) {
-        self.insert_char(' ');
-        self.insert_char(' ');
-        self.insert_char(' ');
-        self.insert_char(' ');
+        self.save_undo_state();
+        let line_idx = self.buffer.line_to_char(self.cursor_y);
+        let char_idx = line_idx + self.cursor_x;
+        self.buffer_insert(char_idx, "    ");
+        self.cursor_x += 4;
+        self.is_dirty = true;
+        self.selection_start = None;
     }
 
     pub fn select_all(&mut self) {
@@ -258,8 +732,8 @@ impl Editor {
         self.cursor_x = self.get_max_cursor_x(last_line);
     }
 
-    pub fn copy(&mut self) {
-        if let Some(clipboard) = &mut self.clipboard {
+    pub fn copy(&mut self, clipboard: &mut Option<arboard::Clipboard>) {
+        if let Some(clipboard) = clipboard {
             let text = if let Some((start_y, start_x)) = self.selection_start {
                 let (sy, sx, ey, ex) = if (start_y, start_x) < (self.cursor_y, self.cursor_x) {
                     (start_y, start_x, self.cursor_y, self.cursor_x)
@@ -276,33 +750,62 @@ impl Editor {
         }
     }
 
-    pub fn paste(&mut self, height: usize) {
-        if let Some(clipboard) = &mut self.clipboard {
-            if let Ok(text) = clipboard.get_text() {
-                if self.selection_start.is_some() {
-                    self.delete_selection();
-                }
-
-                let line_idx = self.buffer.line_to_char(self.cursor_y);
-                let char_idx = line_idx + self.cursor_x;
-                self.buffer.insert(char_idx, &text);
-
-                // Update cursor after paste
-                let text_rope = Rope::from_str(&text);
-                if text_rope.len_lines() > 1 {
-                    self.cursor_y += text_rope.len_lines() - 1;
-                    self.cursor_x = text_rope.line(text_rope.len_lines() - 1).len_chars();
-                } else {
-                    self.cursor_x += text.len();
-                }
+    pub fn cut(&mut self, clipboard: &mut Option<arboard::Clipboard>) {
+        self.save_undo_state();
+        self.copy(clipboard);
+        if self.selection_start.is_some() {
+            self.delete_selection_internal();
+        } else {
+            // Nothing selected: cut whole line
+            let start_char = self.buffer.line_to_char(self.cursor_y);
+            let next_line_idx = (self.cursor_y + 1).min(self.buffer.len_lines());
+            let end_char = if next_line_idx < self.buffer.len_lines() {
+                self.buffer.line_to_char(next_line_idx)
+            } else {
+                self.buffer.len_chars()
+            };
+            if start_char < end_char {
+                self.buffer.remove(start_char..end_char);
+                self.cursor_x = 0;
                 self.is_dirty = true;
-                self.clamp_cursor_x();
-
-                // Ensure the cursor (at the end of the paste) is visible.
-                // This naturally pushes the view down for large pastes, showing the text.
-                self.ensure_cursor_visible(height);
             }
         }
+    }
+
+    pub fn paste(&mut self, clipboard: &mut Option<arboard::Clipboard>, height: usize) {
+        if let Some(clipboard) = clipboard {
+            if let Ok(text) = clipboard.get_text() {
+                self.insert_paste(&text, height);
+            }
+        }
+    }
+
+    pub fn insert_paste(&mut self, text: &str, height: usize) {
+        self.save_undo_state();
+        if self.selection_start.is_some() {
+            self.delete_selection_internal();
+        }
+
+        // Normalize CRLF → LF in pasted text to keep byte offsets consistent
+        let text = &text.replace("\r\n", "\n");
+
+        let line_idx = self.buffer.line_to_char(self.cursor_y);
+        let char_idx = line_idx + self.cursor_x;
+        self.buffer_insert(char_idx, text);
+
+        // Update cursor after paste
+        let text_rope = Rope::from_str(text);
+        if text_rope.len_lines() > 1 {
+            self.cursor_y += text_rope.len_lines() - 1;
+            self.cursor_x = text_rope.line(text_rope.len_lines() - 1).len_chars();
+        } else {
+            self.cursor_x += text.len();
+        }
+        self.is_dirty = true;
+        self.clamp_cursor_x();
+
+        self.ensure_cursor_visible(height);
+        self.ts_reparse();
     }
 
     pub fn ensure_cursor_visible(&mut self, height: usize) {
@@ -317,20 +820,47 @@ impl Editor {
         }
     }
 
-    fn get_max_cursor_x(&self, line_y: usize) -> usize {
-        let total_lines = self.buffer.len_lines();
-        if total_lines == 0 || line_y >= total_lines {
+    pub fn get_max_cursor_x(&self, line_y: usize) -> usize {
+        if line_y >= self.buffer.len_lines() {
             return 0;
         }
         let line = self.buffer.line(line_y);
-        let line_len = line.len_chars();
-
-        let line_str = line.to_string();
-        if line_str.ends_with('\n') || line_str.ends_with('\r') {
-            line_len.saturating_sub(1)
-        } else {
-            line_len
+        let len = line.len_chars();
+        if len == 0 {
+            return 0;
         }
+
+        let mut max_x = len;
+        // Check for line terminators at the end
+        if max_x > 0 && line.char(max_x - 1) == '\n' {
+            max_x -= 1;
+            if max_x > 0 && line.char(max_x - 1) == '\r' {
+                max_x -= 1;
+            }
+        } else if max_x > 0 && line.char(max_x - 1) == '\r' {
+            max_x -= 1;
+        }
+        max_x
+    }
+
+    pub fn get_cursor_screen_column(&self) -> usize {
+        if self.cursor_y >= self.buffer.len_lines() {
+            return 0;
+        }
+        let line = self.buffer.line(self.cursor_y);
+        let mut screen_col = 0;
+        for (i, ch) in line.chars().enumerate() {
+            if i >= self.cursor_x {
+                break;
+            }
+            if ch == '\t' {
+                // Standard 4-space tab handling
+                screen_col += 4 - (screen_col % 4);
+            } else {
+                screen_col += 1;
+            }
+        }
+        screen_col
     }
 
     pub fn clamp_cursor_x(&mut self) {
@@ -338,6 +868,374 @@ impl Editor {
         if self.cursor_x > max_x {
             self.cursor_x = max_x;
         }
+    }
+
+    fn get_ts_style(&self, kind: &str) -> ratatui::style::Style {
+        use ratatui::style::{Color, Modifier, Style};
+        let style = Style::default();
+        match kind {
+            // Keywords
+            "keyword"
+            | "storage_class"
+            | "type_qualifier"
+            | "repeat"
+            | "conditional"
+            | "exception"
+            | "include"
+            | "statement"
+            | "use"
+            | "pub"
+            | "struct"
+            | "enum"
+            | "impl"
+            | "fn"
+            | "let"
+            | "mut"
+            | "match"
+            | "if"
+            | "else"
+            | "elif"
+            | "for"
+            | "while"
+            | "loop"
+            | "return"
+            | "break"
+            | "continue"
+            | "async"
+            | "await"
+            | "crate"
+            | "super"
+            | "self"
+            | "mod"
+            | "trait"
+            | "where"
+            | "const"
+            | "static"
+            | "unsafe"
+            | "extern"
+            | "as"
+            | "move"
+            | "dyn"
+            | "def"
+            | "class"
+            | "import"
+            | "from"
+            | "yield"
+            | "try"
+            | "except"
+            | "finally"
+            | "with"
+            | "lambda"
+            | "pass"
+            | "var"
+            | "switch"
+            | "case"
+            | "default"
+            | "throw"
+            | "new"
+            | "typeof"
+            | "instanceof"
+            | "void"
+            | "delete"
+            | "in"
+            | "of"
+            | "export"
+            | "interface"
+            | "namespace"
+            | "implements"
+            | "extends"
+            | "public"
+            | "private"
+            | "protected"
+            | "readonly"
+            | "abstract"
+            | "declare"
+            | "package"
+            | "go"
+            | "chan"
+            | "select"
+            | "defer"
+            | "fallthrough"
+            | "range"
+            | "extern_crate_declaration" => style.fg(Color::Magenta).add_modifier(Modifier::BOLD),
+
+            // Types
+            "type" | "primitive_type" | "type_identifier" | "builtin_type" | "class_name"
+            | "struct_name" | "type_name" | "user_type" | "type_parameter" => {
+                style.fg(Color::LightBlue)
+            }
+
+            // Functions / Methods
+            "function"
+            | "method"
+            | "function_item"
+            | "call_expression"
+            | "function_declarator"
+            | "field_identifier"
+            | "function_definition"
+            | "method_definition"
+            | "method_declaration"
+            | "constructor" => style.fg(Color::Cyan),
+
+            // Variables / Properties
+            "variable"
+            | "variable_parameter"
+            | "parameter"
+            | "property"
+            | "field"
+            | "shorthand_field_identifier"
+            | "field_name"
+            | "variable_name" => style.fg(Color::White),
+
+            // Constants
+            "constant" | "constant_identifier" | "const_parameter" => {
+                style.fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            }
+
+            // HTML / XML
+            "tag_name" | "start_tag" | "end_tag" | "self_closing_tag" | "tag" => {
+                style.fg(Color::LightBlue)
+            }
+            "attribute_name" => style.fg(Color::Cyan),
+            "attribute_value" => style.fg(Color::Yellow),
+
+            // Literals
+            "string" | "string_literal" | "char_literal" | "escape_sequence"
+            | "system_lib_string" | "raw_string_literal" => style.fg(Color::Yellow),
+            "number" | "integer_literal" | "float_literal" | "boolean_literal" | "none"
+            | "null" | "undefined" | "true" | "false" => style.fg(Color::LightRed),
+
+            // Comments
+            "comment" | "line_comment" | "block_comment" | "doc_comment" => {
+                style.fg(Color::DarkGray).add_modifier(Modifier::ITALIC)
+            }
+
+            // Attributes / Macros
+            "attribute" | "attribute_item" | "meta" | "preproc_directive" | "preproc_arg" => {
+                style.fg(Color::Green).add_modifier(Modifier::ITALIC)
+            }
+            "macro_definition" | "macro_invocation" | "macro_call" | "g_attribute"
+            | "function_macro" => style.fg(Color::LightCyan),
+
+            // Operators & Punctuation
+            "operator"
+            | "binary_expression"
+            | "unary_expression"
+            | "assignment_expression"
+            | "pointer_expression"
+            | "reference_expression" => style.fg(Color::LightCyan),
+
+            "punctuation"
+            | "delimiter"
+            | "bracket"
+            | "parenthesized_expression"
+            | "list"
+            | "parameters"
+            | "arguments" => style.fg(Color::Gray),
+
+            "identifier" => style.fg(Color::White),
+            _ => style.fg(Color::White),
+        }
+    }
+
+    fn get_ts_highlighted_lines(
+        &self,
+        tree: &tree_sitter::Tree,
+        width: usize,
+        height: usize,
+        selection_bg: Color,
+        selection_fg: Color,
+    ) -> Vec<ratatui::text::Line<'_>> {
+        let start_line = self.scroll_y;
+        let end_line = (start_line + height).min(self.buffer.len_lines());
+        let mut lines = Vec::new();
+
+        for i in start_line..end_line {
+            let line_obj = self.buffer.line(i);
+            let line_start_char = self.buffer.line_to_char(i);
+            let start_byte = self.buffer.char_to_byte(line_start_char);
+            let end_byte = start_byte + line_obj.len_bytes();
+
+            let mut spans = Vec::new();
+            let mut current_byte = start_byte;
+
+            // Start from root for each line to ensure we don't miss anything that spans multiple lines
+            // but isn't fully contained in a single descendant. byte-range clipping handles efficiency.
+            let node = tree.root_node();
+            self.walk_line_highlights(node, start_byte, end_byte, &mut current_byte, &mut spans);
+
+            if current_byte < end_byte {
+                let remaining_text = self.get_byte_range_text_clean(current_byte..end_byte);
+                let remaining_text = Self::expand_tabs(&remaining_text);
+                if !remaining_text.is_empty() {
+                    spans.push(ratatui::text::Span::styled(
+                        remaining_text,
+                        ratatui::style::Style::default().fg(ratatui::style::Color::White),
+                    ));
+                }
+            }
+            let mut cleaned_spans = Vec::new();
+            let mut current_char_in_line = 0;
+
+            if let Some((start_y, start_x)) = self.selection_start {
+                let (sy, sx, ey, ex) = if (start_y, start_x) < (self.cursor_y, self.cursor_x) {
+                    (start_y, start_x, self.cursor_y, self.cursor_x)
+                } else {
+                    (self.cursor_y, self.cursor_x, start_y, start_x)
+                };
+
+                let line_idx = i;
+
+                for span in spans {
+                    let text = span.content.trim_end_matches(['\n', '\r']);
+                    if text.is_empty() {
+                        continue;
+                    }
+
+                    let mut current_segment = String::new();
+                    let mut current_is_selected = false;
+
+                    for (idx, c) in text.chars().enumerate() {
+                        let char_pos = current_char_in_line + idx;
+                        let is_char_selected = if line_idx > sy && line_idx < ey {
+                            true
+                        } else if line_idx == sy && line_idx == ey {
+                            char_pos >= sx && char_pos < ex
+                        } else if line_idx == sy {
+                            char_pos >= sx
+                        } else if line_idx == ey {
+                            char_pos < ex
+                        } else {
+                            false
+                        };
+
+                        if idx == 0 {
+                            current_is_selected = is_char_selected;
+                        } else if is_char_selected != current_is_selected {
+                            let mut s_style = span.style;
+                            if current_is_selected {
+                                s_style = s_style.bg(selection_bg).fg(selection_fg);
+                            }
+                            cleaned_spans.push(ratatui::text::Span::styled(
+                                current_segment.clone(),
+                                s_style,
+                            ));
+                            current_segment.clear();
+                            current_is_selected = is_char_selected;
+                        }
+                        current_segment.push(c);
+                    }
+
+                    if !current_segment.is_empty() {
+                        let mut s_style = span.style;
+                        if current_is_selected {
+                            s_style = s_style.bg(selection_bg).fg(selection_fg);
+                        }
+                        cleaned_spans.push(ratatui::text::Span::styled(current_segment, s_style));
+                    }
+                    current_char_in_line += text.chars().count();
+                }
+            } else {
+                for span in spans {
+                    let text = span.content.trim_end_matches(['\n', '\r']);
+                    if !text.is_empty() {
+                        let span_len = text.chars().count();
+                        current_char_in_line += span_len;
+                        cleaned_spans
+                            .push(ratatui::text::Span::styled(text.to_string(), span.style));
+                    }
+                }
+            }
+
+            if current_char_in_line < width {
+                cleaned_spans.push(ratatui::text::Span::raw(
+                    " ".repeat(width - current_char_in_line),
+                ));
+            }
+            lines.push(ratatui::text::Line::from(cleaned_spans));
+        }
+
+        let empty_line = " ".repeat(width);
+        while lines.len() < height {
+            lines.push(ratatui::text::Line::from(empty_line.clone()));
+        }
+        lines
+    }
+
+    fn walk_line_highlights(
+        &self,
+        node: tree_sitter::Node,
+        line_start: usize,
+        line_end: usize,
+        current_byte: &mut usize,
+        spans: &mut Vec<ratatui::text::Span>,
+    ) {
+        let node_start = node.start_byte();
+        let node_end = node.end_byte();
+
+        // Skip nodes entirely outside the current line's byte range
+        if node_start >= line_end || node_end <= line_start {
+            return;
+        }
+
+        if node.child_count() == 0 {
+            // --- Gap fill ---
+            // Clip gap to the current line boundary [line_start, line_end)
+            if node_start > *current_byte {
+                let gap_start = (*current_byte).max(line_start);
+                let gap_end = node_start.min(line_end);
+                if gap_start < gap_end {
+                    let gap_text = self.get_byte_range_text_clean(gap_start..gap_end);
+                    let gap_text = Self::expand_tabs(&gap_text);
+                    if !gap_text.is_empty() {
+                        spans.push(ratatui::text::Span::styled(
+                            gap_text,
+                            ratatui::style::Style::default().fg(ratatui::style::Color::White),
+                        ));
+                    }
+                }
+            }
+
+            // --- Node text ---
+            // Clip node text to the current line boundary [line_start, line_end)
+            let start = node_start.max(*current_byte).max(line_start);
+            let end = node_end.min(line_end);
+            if start < end {
+                let text = self.get_byte_range_text_clean(start..end);
+                let text = Self::expand_tabs(&text);
+                if !text.is_empty() {
+                    spans.push(ratatui::text::Span::styled(
+                        text,
+                        self.get_ts_style(node.kind()),
+                    ));
+                }
+                *current_byte = end;
+            }
+        } else {
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i) {
+                    self.walk_line_highlights(child, line_start, line_end, current_byte, spans);
+                }
+            }
+        }
+    }
+
+    /// Expand tab characters to 4 spaces for consistent rendering.
+    /// This ensures display-width tracking matches what the terminal renders.
+    fn expand_tabs(text: &str) -> String {
+        text.replace('\t', "    ")
+    }
+
+    /// Extract text from a byte range and strip ALL newline / carriage-return
+    /// characters.  This prevents cross-line content from leaking into a
+    /// single rendered line, which is the root cause of "ghost text".
+    fn get_byte_range_text_clean(&self, range: std::ops::Range<usize>) -> String {
+        let start = self.buffer.byte_to_char(range.start);
+        let end = self.buffer.byte_to_char(range.end);
+        self.buffer
+            .slice(start..end)
+            .to_string()
+            .replace(['\n', '\r'], "")
     }
 }
 
