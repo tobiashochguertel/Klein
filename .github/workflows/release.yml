@@ -172,18 +172,18 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"${VERSION_NUM}\"/" Cargo.toml
           grep '^version' Cargo.toml
 
-          # Update the [[package]] entry for 'klein' in Cargo.lock using awk
-          # (context-sensitive: only the 'klein' package block, not dependencies)
+          # Update the [[package]] entry for 'klein-ide' in Cargo.lock using awk
+          # (context-sensitive: only the 'klein-ide' package block, not dependencies)
           awk -v ver="${VERSION_NUM}" '
             /^\[\[package\]\]/        { in_pkg=1 }
-            in_pkg && /^name = "klein"/ { found=1 }
+            in_pkg && /^name = "klein-ide"/ { found=1 }
             in_pkg && found && /^version = / {
               sub(/"[^"]*"/, "\"" ver "\""); found=0; in_pkg=0
             }
             { print }
           ' Cargo.lock > Cargo.lock.tmp && mv Cargo.lock.tmp Cargo.lock
           echo "✓ Cargo.lock updated"
-          grep -A2 'name = "klein"' Cargo.lock | head -3
+          grep -A2 'name = "klein-ide"' Cargo.lock | head -3
 
       - name: Commit and push version bump
         id: push
